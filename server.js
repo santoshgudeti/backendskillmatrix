@@ -15,7 +15,7 @@ const path = require('path');
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
 const dotenv = require("dotenv");
-const sgMail = require('@sendgrid/mail');
+const nodemailer = require('nodemailer');
 const rateLimit = require('express-rate-limit');
 const cookieParser = require('cookie-parser');
 const { body, validationResult } = require('express-validator');
@@ -84,7 +84,6 @@ const audioUpload = multer({
 }).single('audio');
 
 const upload = multer({ storage: memoryStorage });
-sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 // User Model
 const userSchema = new mongoose.Schema({
   fullName: { type: String, required: true },
@@ -1329,12 +1328,7 @@ app.post('/api/generate-voice-questions', async (req, res) => {
 
 
 // Test link generator //
-
-
-// SendGrid Setup
-sgMail.setApiKey(process.env.SENDGRID_API_KEY);
-
-// Updated send-test-link endpoint
+// Updated send-test-link endpoint with NodeMailer
 app.post('/api/send-test-link', async (req, res) => {
   const { candidateEmail, jobTitle, resumeId, jobDescriptionId, questions, voiceQuestions } = req.body;
   
@@ -1379,13 +1373,19 @@ app.post('/api/send-test-link', async (req, res) => {
     });
     await session.save();
 
-    // Enhanced email template
-    const msg = {
+    // Create NodeMailer transporter
+    const transporter = nodemailer.createTransport({
+      service: 'gmail',
+      auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASSWORD
+      }
+    });
+
+    // Email options
+    const mailOptions = {
+      from: `"Assessment System" <${process.env.EMAIL_USER}>`,
       to: candidateEmail,
-      from: {
-        email: process.env.SENDGRID_FROM_EMAIL,
-        name: 'Assessment System'
-      },
       subject: `Your Assessment for ${jobTitle}`,
       text: `Please complete your assessment at: ${testLink}`,
       html: `
@@ -1439,17 +1439,12 @@ app.post('/api/send-test-link', async (req, res) => {
           </div>
         </body>
         </html>
-      `,
-      mail_settings: {
-        sandbox_mode: {
-          enable: process.env.NODE_ENV === 'test' // Enable sandbox for testing
-        }
-      }
+      `
     };
 
     // Send email with detailed error handling
     try {
-      await sgMail.send(msg);
+      await transporter.sendMail(mailOptions);
       console.log(`Email sent to ${candidateEmail}`);
       
       res.status(200).json({ 
@@ -1467,13 +1462,13 @@ app.post('/api/send-test-link', async (req, res) => {
       // Extract detailed error message
       let errorMessage = 'Failed to send assessment email';
       if (emailError.response) {
-        errorMessage = emailError.response.body?.errors?.map(e => e.message).join(', ') || errorMessage;
+        errorMessage = emailError.response;
       }
       
       res.status(500).json({ 
         success: false,
         error: errorMessage,
-        details: process.env.NODE_ENV === 'development' ? emailError.response?.body : undefined
+        details: process.env.NODE_ENV === 'development' ? emailError : undefined
       });
     }
   } catch (error) {
@@ -1484,7 +1479,6 @@ app.post('/api/send-test-link', async (req, res) => {
     });
   }
 });
-
 
 
 // New endpoint to start assessment recording
@@ -2191,22 +2185,36 @@ trialEnd: new Date(Date.now() + 24 * 60 * 60 * 1000), // 1-day trial
 await user.save();
 
 // Send verification email
+// Send verification email with NodeMailer
 const verificationToken = jwt.sign({ email }, JWT_SECRET, { expiresIn: '1h' });
 const verificationLink = `${process.env.BACKEND_URL}/verify-email?token=${verificationToken}`;
 
-const msg = {
-to: email,
-from: process.env.SENDGRID_FROM_EMAIL,
-subject: 'Verify your email',
-text: `Click the link to verify your email: ${verificationLink}`,
+// Create NodeMailer transporter
+const transporter = nodemailer.createTransport({
+  service: 'gmail',
+  auth: {
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASSWORD
+  }
+});
+
+const mailOptions = {
+  from: process.env.EMAIL_USER,
+  to: email,
+  subject: 'Verify your email',
+  text: `Click the link to verify your email: ${verificationLink}`,
+  html: `
+    <p>Click the link below to verify your email:</p>
+    <a href="${verificationLink}">Verify Email</a>
+    <p>Or copy and paste this link into your browser: ${verificationLink}</p>
+  `
 };
 
-await sgMail.send(msg);
-
+ await transporter.sendMail(mailOptions);
 res.status(201).json({ message: 'User registered. Please check your email for verification.' });
 } catch (error) {
-console.error(error);
-res.status(500).json({ message: 'Server error.' });
+  console.error('Email sending error:', error);
+  res.status(500).json({ message: 'Failed to send verification email.' });
 }
 }
 );
@@ -2315,12 +2323,12 @@ app.get('/user', authenticateJWT, async (req, res) => {
 // Save admin details
 const saveAdmin = async () => {
   const admin = {
-    fullName: 'Santosh Gudeti',
-    email: 'santoshgudeti@gmail.com',
-    password: await bcrypt.hash('adminpassword', 10),
-    mobileNumber: '1234567890',
-    companyName: 'Admin Corp',
-    designation: 'Admin',
+    fullName: process.env.ADMIN_FULLNAME,
+    email: process.env.ADMIN_EMAIL,
+    password: await bcrypt.hash(process.env.ADMIN_PASSWORD, 10),
+    mobileNumber: process.env.ADMIN_MOBILE,
+    companyName: process.env.ADMIN_COMPANY,
+    designation: process.env.ADMIN_DESIGNATION,
     isEmailVerified: true,
     isAdmin: true,
     isUnlimited: true, // Admin has unlimited access
