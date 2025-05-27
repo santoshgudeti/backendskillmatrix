@@ -85,6 +85,7 @@ const audioUpload = multer({
 
 const upload = multer({ storage: memoryStorage });
 // User Model
+// User Schema with approval status
 const userSchema = new mongoose.Schema({
   fullName: { type: String, required: true },
   email: { type: String, required: true, unique: true },
@@ -94,10 +95,11 @@ const userSchema = new mongoose.Schema({
   designation: { type: String, required: true },
   isEmailVerified: { type: Boolean, default: false },
   isAdmin: { type: Boolean, default: false },
-  trialStart: { type: Date, default: Date.now }, // When trial starts
-  trialEnd: { type: Date }, // When trial ends (Admin can extend it)
-  isUnlimited: { type: Boolean, default: false }, // If true, no expiry
-});
+  isApproved: { type: Boolean, default: false }, // New field for admin approval
+  trialStart: { type: Date, default: Date.now },
+  trialEnd: { type: Date },
+  isUnlimited: { type: Boolean, default: false },
+}, { timestamps: true });
 
 const User = mongoose.model('User', userSchema);
 
@@ -2116,127 +2118,261 @@ app.post('/api/evaluate-answers/:sessionId', async (req, res) => {
 const blockedDomains = process.env.BLOCKED_DOMAINS ? process.env.BLOCKED_DOMAINS.split(',') : [];
 
 // Login
+// Login with approval check
 app.post('/login', async (req, res) => {
-const { email, password } = req.body;
+  const { email, password } = req.body;
 
-try {
-const user = await User.findOne({ email });
-if (!user) return res.status(400).json({ message: 'Invalid email or password.' });
+  try {
+    const user = await User.findOne({ email });
+    if (!user) return res.status(400).json({ message: 'Invalid email or password.' });
 
-const isPasswordValid = await bcrypt.compare(password, user.password);
-if (!isPasswordValid) return res.status(400).json({ message: 'Invalid email or password.' });
+    const isPasswordValid = await bcrypt.compare(password, user.password);
+    if (!isPasswordValid) return res.status(400).json({ message: 'Invalid email or password.' });
 
-if (!user.isEmailVerified) return res.status(400).json({ message: 'Please verify your email first.' });
+    // Skip approval check for admin
+    if (!user.isAdmin) {
+      if (!user.isEmailVerified) {
+        return res.status(400).json({ message: 'Please verify your email first.' });
+      }
+      
+      if (!user.isApproved) {
+        return res.status(400).json({ message: 'Your account is pending admin approval.' });
+      }
 
-if (!user.isUnlimited && user.trialEnd < new Date()) return res.status(400).json({ message: 'Trial expired. Contact admin.' });
+      if (!user.isUnlimited && user.trialEnd < new Date()) {
+        return res.status(400).json({ message: 'Trial expired. Contact admin.' });
+      }
+    }
 
-const token = jwt.sign({ id: user._id, isAdmin: user.isAdmin }, JWT_SECRET, { expiresIn: '1h' });
+    const token = jwt.sign(
+      { 
+        id: user._id, 
+        isAdmin: user.isAdmin,
+        email: user.email
+      }, 
+      JWT_SECRET, 
+      { expiresIn: '1h' }
+    );
 
-res.cookie('token', token, { httpOnly: true, secure: false, sameSite: 'Lax' });
-res.status(200).json({ message: 'Login successful.', role: user.isAdmin ? 'admin' : 'user' });
-console.log("Cookie Set:", token);
-} catch (error) {
-console.error(error);
-res.status(500).json({ message: 'Server error.' });
-}
-});
+    res.cookie('token', token, { 
+      httpOnly: true, 
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'strict'
+    });
 
-// Register a new user
-app.post(
-'/register',
-[
-body('fullName').notEmpty(),
-body('email').isEmail(),
-body('password').isLength({ min: 6 }),
-body('mobileNumber').notEmpty(),
-body('companyName').notEmpty(),
-body('designation').notEmpty(),
-],
-async (req, res) => {
-const errors = validationResult(req);
-if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
-
-const { fullName, email, password, mobileNumber, companyName, designation } = req.body;
-const emailDomain = email.split('@')[1];
-
-if (blockedDomains.includes(emailDomain)) {
-return res.status(400).json({ message: 'Personal email domains are not allowed. Please use your company email.' });
-}
-
-try {
-// Check if user already exists
-const existingUser = await User.findOne({ email });
-if (existingUser) return res.status(400).json({ message: 'User already exists.' });
-
-// Hash password
-const hashedPassword = await bcrypt.hash(password, 10);
-
-// Create user
-const user = new User({
-fullName,
-email,
-password: hashedPassword,
-mobileNumber,
-companyName,
-designation,
-trialEnd: new Date(Date.now() + 24 * 60 * 60 * 1000), // 1-day trial
-});
-
-await user.save();
-
-// Send verification email
-// Send verification email with NodeMailer
-const verificationToken = jwt.sign({ email }, JWT_SECRET, { expiresIn: '1h' });
-const verificationLink = `${process.env.BACKEND_URL}/verify-email?token=${verificationToken}`;
-
-// Create NodeMailer transporter
-const transporter = nodemailer.createTransport({
-  service: 'gmail',
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASSWORD
+    res.status(200).json({ 
+      message: 'Login successful.', 
+      user: {
+        id: user._id,
+        email: user.email,
+        fullName: user.fullName,
+        isAdmin: user.isAdmin
+      }
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: 'Server error.' });
   }
 });
+ // Create NodeMailer transporter
+      const transporter = nodemailer.createTransport({
+        service: 'gmail',
+        auth: {
+          user: process.env.EMAIL_USER,
+          pass: process.env.EMAIL_PASSWORD
+        }
+      });
+// Register a new user with admin approval flow
+// Updated Register Endpoint with proper error handling and responses
+app.post(
+  '/register',
+  [
+    body('fullName').notEmpty().withMessage('Full name is required'),
+    body('email').isEmail().withMessage('Valid email is required'),
+    body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters'),
+    body('mobileNumber').notEmpty().withMessage('Mobile number is required'),
+    body('companyName').notEmpty().withMessage('Company name is required'),
+    body('designation').notEmpty().withMessage('Designation is required'),
+  ],
+  async (req, res) => {
+    try {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        return res.status(400).json({ 
+          success: false,
+          message: 'Validation failed',
+          errors: errors.array().map(err => err.msg) 
+        });
+      }
 
-const mailOptions = {
-  from: process.env.EMAIL_USER,
-  to: email,
-  subject: 'Verify your email',
-  text: `Click the link to verify your email: ${verificationLink}`,
-  html: `
-    <p>Click the link below to verify your email:</p>
-    <a href="${verificationLink}">Verify Email</a>
-    <p>Or copy and paste this link into your browser: ${verificationLink}</p>
-  `
-};
+      const { fullName, email, password, mobileNumber, companyName, designation } = req.body;
+      const emailDomain = email.split('@')[1];
+      const blockedDomains = process.env.BLOCKED_DOMAINS ? process.env.BLOCKED_DOMAINS.split(',') : [];
 
- await transporter.sendMail(mailOptions);
-res.status(201).json({ message: 'User registered. Please check your email for verification.' });
-} catch (error) {
-  console.error('Email sending error:', error);
-  res.status(500).json({ message: 'Failed to send verification email.' });
-}
-}
+      if (blockedDomains.includes(emailDomain)) {
+        return res.status(400).json({ 
+          success: false,
+          message: 'Personal email domains are not allowed. Please use your company email.' 
+        });
+      }
+
+      // Check if user already exists
+      const existingUser = await User.findOne({ email });
+      if (existingUser) {
+        return res.status(400).json({ 
+          success: false,
+          message: 'User with this email already exists. Please login or use a different email.' 
+        });
+      }
+
+      // Hash password and create user
+      const hashedPassword = await bcrypt.hash(password, 10);
+      const user = new User({
+        fullName,
+        email,
+        password: hashedPassword,
+        mobileNumber,
+        companyName,
+        designation,
+        trialEnd: new Date(Date.now() + 24 * 60 * 60 * 1000), // 1-day trial
+      });
+
+      await user.save();
+
+      // Generate verification token
+      const verificationToken = jwt.sign({ email }, JWT_SECRET, { expiresIn: '1h' });
+      const verificationLink = `${process.env.BACKEND_URL}/verify-email?token=${verificationToken}`;
+
+    
+      
+      // Send verification email to user
+      try {
+        await transporter.sendMail({
+          from: `"SkillMatrix AI" <${process.env.EMAIL_USER}>`,
+          to: email,
+          subject: 'Verify Your Email - SkillMatrix AI',
+          html: `
+            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+              <h2 style="color: #2563eb;">Welcome to SkillMatrix AI, ${fullName}!</h2>
+              <p>Thank you for registering. Please verify your email address to continue:</p>
+              <div style="text-align: center; margin: 20px 0;">
+                <a href="${verificationLink}" 
+                   style="background-color: #2563eb; color: white; padding: 10px 20px; 
+                          text-decoration: none; border-radius: 5px; display: inline-block;">
+                  Verify Email
+                </a>
+              </div>
+              <p>After verification, your account will be reviewed by our admin team.</p>
+              <p>You'll receive another email once your account is approved.</p>
+              <p style="font-size: 12px; color: #6b7280;">
+                If you didn't request this, please ignore this email.
+              </p>
+            </div>
+          `
+        });
+      } catch (emailError) {
+        console.error('Failed to send verification email:', emailError);
+        // Don't fail the registration if email fails
+      }
+
+      // Send admin notification
+      try {
+        const adminEmail = process.env.ADMIN_EMAIL || 'skillmatrixai@gmail.com';
+        const adminDashboardLink = `${process.env.FRONTEND_URL}/dashboard/admin`;
+        
+        await transporter.sendMail({
+          from: `"SkillMatrix AI" <${process.env.EMAIL_USER}>`,
+          to: adminEmail,
+          subject: 'New User Registration Needs Approval',
+          html: `
+            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+              <h2 style="color: #2563eb;">New User Registration</h2>
+              <p>A new user has registered and needs approval:</p>
+              <ul style="list-style: none; padding: 0;">
+                <li><strong>Name:</strong> ${fullName}</li>
+                <li><strong>Email:</strong> ${email}</li>
+                <li><strong>Company:</strong> ${companyName}</li>
+                <li><strong>Designation:</strong> ${designation}</li>
+                <li><strong>Mobile:</strong> ${mobileNumber}</li>
+              </ul>
+              <div style="text-align: center; margin: 20px 0;">
+                <a href="${adminDashboardLink}" 
+                   style="background-color: #2563eb; color: white; padding: 10px 20px; 
+                          text-decoration: none; border-radius: 5px; display: inline-block;">
+                  View in Admin Dashboard
+                </a>
+              </div>
+              <p>Please review and approve this user within 24 hours.</p>
+            </div>
+          `
+        });
+      } catch (adminEmailError) {
+        console.error('Failed to send admin notification:', adminEmailError);
+      }
+
+      // Successful response
+      return res.status(201).json({ 
+        success: true,
+        message: 'Registration successful! Please check your email to verify your account. You will be notified once admin approves your registration.'
+      });
+
+    } catch (error) {
+      console.error('Registration error:', error);
+      return res.status(500).json({ 
+        success: false,
+        message: 'An error occurred during registration. Please try again later.'
+      });
+    }
+  }
 );
 
-// Verify email
+// Updated Verify Email Endpoint
 app.get('/verify-email', async (req, res) => {
-const { token } = req.query;
+  const { token } = req.query;
 
-try {
-const decoded = jwt.verify(token, JWT_SECRET);
-const user = await User.findOne({ email: decoded.email });
+  if (!token) {
+    return res.status(400).json({ 
+      success: false,
+      message: 'Verification token is required' 
+    });
+  }
 
-if (!user) return res.status(400).json({ message: 'Invalid token.' });
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    const user = await User.findOneAndUpdate(
+      { email: decoded.email },
+      { isEmailVerified: true },
+      { new: true }
+    );
 
-user.isEmailVerified = true;
-await user.save();
+    if (!user) {
+      return res.status(400).json({ 
+        success: false,
+        message: 'Invalid verification token. Please try registering again.' 
+      });
+    }
 
-res.status(200).json({ message: 'Email verified successfully.' });
-} catch (error) {
-console.error(error);
-res.status(400).json({ message: 'Invalid or expired token.' });
-}
+    // Send success response
+    return res.status(200).json({ 
+      success: true,
+      message: 'Email verified successfully! Your account is now pending admin approval. You will receive an email once approved.'
+    });
+
+  } catch (error) {
+    console.error('Email verification error:', error);
+    
+    let errorMessage = 'Email verification failed';
+    if (error.name === 'TokenExpiredError') {
+      errorMessage = 'Verification link has expired. Please request a new one.';
+    } else if (error.name === 'JsonWebTokenError') {
+      errorMessage = 'Invalid verification token.';
+    }
+
+    return res.status(400).json({ 
+      success: false,
+      message: errorMessage 
+    });
+  }
 });
                               
 // Admin dashboard (protected route)
@@ -2249,6 +2385,121 @@ app.get('/admin', authenticateJWT, isAdmin, async (req, res) => {
     res.status(500).json({ message: 'Server error.' });
   }
 });
+
+// Admin approve user endpoint
+app.post('/admin/approve-user/:userId', authenticateJWT, isAdmin, async (req, res) => {
+  try {
+    const user = await User.findByIdAndUpdate(
+      req.params.userId,
+      { 
+        isApproved: true,
+        trialStart: new Date(),
+        trialEnd: new Date(Date.now() + 24 * 60 * 60 * 1000) // 1-day trial
+      },
+      { new: true }
+    );
+
+    if (!user) return res.status(404).json({ message: 'User not found.' });
+
+    // Send approval email to user
+    await transporter.sendMail({
+      from: process.env.EMAIL_USER,
+      to: user.email,
+      subject: 'Your Account Has Been Approved - SkillMatrix AI',
+      html: `
+        <p>Dear ${user.fullName},</p>
+        <p>Your account has been approved by the admin team. You can now login and start using SkillMatrix AI.</p>
+        <p>You have a 1-day trial period. After that, please contact the admin to extend your access.</p>
+        <a href="${process.env.FRONTEND_URL}/login">Login Now</a>
+        <p>Thank you for choosing SkillMatrix AI!</p>
+      `
+    });
+
+    res.status(200).json({ 
+      message: 'User approved successfully.',
+      user: {
+        id: user._id,
+        email: user.email,
+        fullName: user.fullName
+      }
+    });
+  } catch (error) {
+    console.error('Approval error:', error);
+    res.status(500).json({ message: 'Failed to approve user.' });
+  }
+});
+
+// Get pending users for admin
+app.get('/admin/pending-users', authenticateJWT, isAdmin, async (req, res) => {
+  try {
+    const users = await User.find({
+      isEmailVerified: true,
+      isApproved: false,
+      isAdmin: false
+    }).select('-password');
+
+    res.status(200).json(users);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: 'Failed to fetch pending users.' });
+  }
+});
+
+// Admin Dashboard Routes
+app.get('/admin/dashboard', authenticateJWT, isAdmin, async (req, res) => {
+  try {
+    const users = await User.find({}).select('-password');
+    const pendingUsers = await User.find({
+      isEmailVerified: true,
+      isApproved: false,
+      isAdmin: false
+    }).select('-password');
+    
+    const stats = {
+      totalUsers: users.length,
+      pendingApproval: pendingUsers.length,
+      activeUsers: users.filter(u => u.isApproved).length,
+      adminUsers: users.filter(u => u.isAdmin).length
+    };
+
+    res.status(200).json({ 
+      success: true,
+      users,
+      pendingUsers,
+      stats
+    });
+  } catch (error) {
+    console.error('Admin dashboard error:', error);
+    res.status(500).json({ 
+      success: false,
+      message: 'Failed to load admin dashboard data' 
+    });
+  }
+});
+
+// Get user by ID
+app.get('/admin/users/:id', authenticateJWT, isAdmin, async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id).select('-password');
+    if (!user) {
+      return res.status(404).json({ 
+        success: false,
+        message: 'User not found' 
+      });
+    }
+    res.status(200).json({ 
+      success: true,
+      user 
+    });
+  } catch (error) {
+    console.error('Get user error:', error);
+    res.status(500).json({ 
+      success: false,
+      message: 'Failed to get user' 
+    });
+  }
+});
+
 // Update user details
 app.put('/admin/update-user/:userId', authenticateJWT, isAdmin, async (req, res) => {
   const { userId } = req.params;
@@ -2320,22 +2571,40 @@ app.get('/user', authenticateJWT, async (req, res) => {
   }
 });
 
-// Save admin details
-const saveAdmin = async () => {
-  const admin = {
-    fullName: process.env.ADMIN_FULLNAME,
-    email: process.env.ADMIN_EMAIL,
-    password: await bcrypt.hash(process.env.ADMIN_PASSWORD, 10),
-    mobileNumber: process.env.ADMIN_MOBILE,
-    companyName: process.env.ADMIN_COMPANY,
-    designation: process.env.ADMIN_DESIGNATION,
-    isEmailVerified: true,
-    isAdmin: true,
-    isUnlimited: true, // Admin has unlimited access
-  };
+// Save admin details on startup
 
-  await User.findOneAndUpdate({ email: admin.email }, admin, { upsert: true });
+// Save admin details on startup with enhanced error handling
+const saveAdmin = async () => {
+  try {
+    const adminEmail = process.env.ADMIN_EMAIL || 'skillmatrixai@gmail.com';
+    const adminPassword = process.env.ADMIN_PASSWORD || 'admin@123';
+    
+    const admin = {
+      fullName: process.env.ADMIN_FULLNAME || 'Admin User',
+      email: adminEmail,
+      password: await bcrypt.hash(adminPassword, 10),
+      mobileNumber: process.env.ADMIN_MOBILE || '0000000000',
+      companyName: process.env.ADMIN_COMPANY || 'SkillMatrix AI',
+      designation: process.env.ADMIN_DESIGNATION || 'Admin',
+      isEmailVerified: true,
+      isAdmin: true,
+      isApproved: true,
+      isUnlimited: true,
+    };
+
+    const existingAdmin = await User.findOne({ email: adminEmail });
+    if (existingAdmin) {
+      await User.findOneAndUpdate({ email: adminEmail }, admin);
+      console.log('Admin user updated');
+    } else {
+      await User.create(admin);
+      console.log('Admin user created');
+    }
+  } catch (error) {
+    console.error('Failed to setup admin user:', error);
+  }
 };
+
 app.post('/logout', (req, res) => {
   res.clearCookie('token', { path: '/' });
   res.clearCookie('refreshToken', { path: '/' });
