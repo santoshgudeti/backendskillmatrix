@@ -40,8 +40,8 @@ const io = new Server(server, { cors: { origin: '*' } });
 // Middleware
 app.use(
   cors({
-    origin: 'http://localhost:5173', // Allow frontend origin
-    credentials: true, // Allow cookies & authentication headers
+    origin: process.env.FRONTEND_URL,
+    credentials: true, // needed for cookies, auth headers, etc.
   })
 );
 app.use(express.json());
