@@ -2610,6 +2610,7 @@ app.post('/logout', (req, res) => {
   res.clearCookie('refreshToken', { path: '/' });
   res.status(200).json({ message: 'Logged out successfully' });
 });
+app.set('trust proxy', true); // or a specific number if you're behind multiple proxies
 // Start Server
 server.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
