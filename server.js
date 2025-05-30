@@ -31,7 +31,7 @@ const { Blob } = require('buffer');
 dotenv.config();
 // Initialize Express app
 const app = express();
-const PORT = process.env.PORT;
+const PORT = process.env.PORT;  
 
 // Create an HTTP server to support WebSockets
 const server = http.createServer(app);
@@ -40,8 +40,8 @@ const io = new Server(server, { cors: { origin: '*' } });
 // Middleware
 app.use(
   cors({
-    origin: 'http://localhost:5173', // Allow frontend origin
-    credentials: true, // Allow cookies & authentication headers
+    origin: process.env.FRONTEND_URL,
+    credentials: true, // needed for cookies, auth headers, etc.
   })
 );
 app.use(express.json());
@@ -99,6 +99,41 @@ const userSchema = new mongoose.Schema({
   trialStart: { type: Date, default: Date.now },
   trialEnd: { type: Date },
   isUnlimited: { type: Boolean, default: false },
+ subscription: {
+    type: {
+      plan: { 
+        type: String, 
+        enum: ['trial', 'free', 'paid'], 
+        default: 'trial',
+        required: true
+      },
+      startedAt: { type: Date, default: Date.now },
+      expiresAt: { type: Date },
+      isActive: { type: Boolean, default: true },
+      limits: {
+        jdUploads: { type: Number, default: 1 },
+        resumeUploads: { type: Number, default: 10 },
+        assessments: { type: Number, default: 1 }
+      }
+    },
+    default: () => ({
+      plan: 'trial',
+      startedAt: Date.now(),
+      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000), // 1 day trial
+      isActive: true,
+      limits: {
+        jdUploads: 1,
+        resumeUploads: 10,
+        assessments: 1
+      }
+    })
+  },
+  usage: {
+    jdUploads: { type: Number, default: 0 },
+    resumeUploads: { type: Number, default: 0 },
+    assessments: { type: Number, default: 0 }
+  },
+  // Removed: isUnlimited, trialEnd, trialStart
 }, { timestamps: true });
 
 const User = mongoose.model('User', userSchema);
@@ -161,8 +196,9 @@ const VoiceAnswerSchema = new mongoose.Schema({
       Relevance: Number,
       StructuredAnswers: Number,
       UniqueQualities: Number,
-      total_overall_score: Number,
-      total_average: Number
+      total_average: Number,
+      total_overall_score: Number
+     
     },
     processedAt: Date,
     status: {
@@ -384,8 +420,72 @@ const calculateHash = (buffer) => {
   return crypto.createHash('sha256').update(buffer).digest('hex');
 };
 
+
+/* relared to the subscription */
+// Subscription check middleware
+// Updated checkSubscription middleware
+const checkSubscription = async (req, res, next) => {
+  const user = await User.findById(req.user.id);
+  
+  // Skip all checks for admin
+  if (user.isAdmin) return next();
+
+  // Check if subscription is inactive
+  if (!user.subscription.isActive) {
+    return res.status(403).json({ 
+      message: 'Subscription inactive. Please contact admin.' 
+    });
+  }
+
+  // Check if subscription expired
+  if (user.subscription.expiresAt && new Date() > user.subscription.expiresAt) {
+    return res.status(403).json({ 
+      message: 'Subscription expired. Please renew your plan.' 
+    });
+  }
+
+  next();
+};
+
+// Updated usage limit middleware
+const checkUsageLimits = (type) => async (req, res, next) => {
+  const user = await User.findById(req.user.id);
+  
+  // Skip all checks for admin
+  if (user.isAdmin) return next();
+
+  // Free and paid plans have no limits
+  if (user.subscription.plan !== 'trial') return next();
+  
+  // Check if expired
+  if (user.subscription.expiresAt && new Date() > user.subscription.expiresAt) {
+    return res.status(403).json({ 
+      message: 'Subscription expired. Please renew your plan.' 
+    });
+  }
+  
+  // For trial users only - check usage
+  if (user.usage[type] >= getTrialLimit(type)) {
+    return res.status(403).json({ 
+      message: `You've reached your ${type} limit for your trial period.` 
+    });
+  }
+
+  next();
+};
+
+// Helper function for trial limits
+const getTrialLimit = (type) => {
+  const trialLimits = {
+    jdUploads: 1,
+    resumeUploads: 10,
+    assessments: 1
+  };
+  return trialLimits[type] || 0;
+};
+
 // POST Endpoint: Upload Resumes and Job Descriptions
-app.post('/api/submit', upload.fields([{ name: 'resumes' }, { name: 'job_description' }]), async (req, res) => {
+app.post('/api/submit',authenticateJWT,checkSubscription,checkUsageLimits('jdUploads'),checkUsageLimits('resumeUploads'), upload.fields([{ name: 'resumes' }, { name: 'job_description' }]), async (req, res) => {
   let duplicateCount = 0;
   try {
     const { files } = req;
@@ -483,7 +583,13 @@ app.post('/api/submit', upload.fields([{ name: 'resumes' }, { name: 'job_descrip
         }
       }
     }
-
+// Update usage
+      await User.findByIdAndUpdate(req.user.id, {
+        $inc: {
+          'usage.jdUploads': files.job_description.length,
+          'usage.resumeUploads': files.resumes.length
+        }
+      });
     console.log(`Total duplicates found: ${duplicateCount}`); // Log the total number of duplicates
     res.status(200).json({ message: 'Files processed and stored successfully.', results, duplicateCount });
   } catch (error) {
@@ -1166,7 +1272,7 @@ app.post('/api/generate-questions', async (req, res) => {
     };
 
     // Call question generation API with proper headers
-    const response = await axios.post(process.env.VOICE_GENERATION_API, form, {
+    const response = await axios.post(process.env.MCQ_GENERATION_API, form, {
       headers,
       maxContentLength: Infinity,
       maxBodyLength: Infinity,
@@ -1261,7 +1367,7 @@ app.post('/api/generate-voice-questions', async (req, res) => {
     'Accept': 'application/json'
   };
 
-  const response = await axios.post(process.env.MCQ_GENERATION_API, form, {
+  const response = await axios.post(process.env.VOICE_GENERATION_API, form, {
     headers,
     maxContentLength: Infinity,
     maxBodyLength: Infinity,
@@ -1331,7 +1437,7 @@ app.post('/api/generate-voice-questions', async (req, res) => {
 
 // Test link generator //
 // Updated send-test-link endpoint with NodeMailer
-app.post('/api/send-test-link', async (req, res) => {
+app.post('/api/send-test-link', authenticateJWT,checkSubscription,checkUsageLimits('assessments'), async (req, res) => {
   const { candidateEmail, jobTitle, resumeId, jobDescriptionId, questions, voiceQuestions } = req.body;
   
   // Enhanced validation
@@ -1460,7 +1566,9 @@ app.post('/api/send-test-link', async (req, res) => {
       
       // Delete the session if email fails
       await AssessmentSession.findByIdAndDelete(session._id);
-      
+        await User.findByIdAndUpdate(req.user.id, {
+        $inc: { 'usage.assessments': 1 }
+      });
       // Extract detailed error message
       let errorMessage = 'Failed to send assessment email';
       if (emailError.response) {
@@ -2184,9 +2292,7 @@ app.post('/login', async (req, res) => {
       });
 // Register a new user with admin approval flow
 // Updated Register Endpoint with proper error handling and responses
-app.post(
-  '/register',
-  [
+app.post( '/register',[
     body('fullName').notEmpty().withMessage('Full name is required'),
     body('email').isEmail().withMessage('Valid email is required'),
     body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters'),
@@ -2235,7 +2341,17 @@ app.post(
         companyName,
         designation,
         trialEnd: new Date(Date.now() + 24 * 60 * 60 * 1000), // 1-day trial
-      });
+        subscription: {
+        plan: 'trial',
+        expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000), // 1-day trial
+        isActive: true,
+        limits: {
+        jdUploads: 1,
+        resumeUploads: 10,
+        assessments: 1
+      }
+    }
+  });
 
       await user.save();
 
@@ -2385,7 +2501,91 @@ app.get('/admin', authenticateJWT, isAdmin, async (req, res) => {
     res.status(500).json({ message: 'Server error.' });
   }
 });
+// Admin subscription management
+// Update subscription management endpoint
+// Update subscription management endpoint
+// Updated subscription management endpoint
+app.put('/admin/update-subscription/:userId', authenticateJWT, isAdmin, async (req, res) => {
+  try {
+    const { plan, months } = req.body;
+    const userId = req.params.userId;
 
+    // Calculate expiration date and limits based on plan
+    let updateData = {};
+    const now = new Date();
+
+    switch(plan) {
+      case 'trial':
+        updateData = {
+          'subscription.plan': 'trial',
+          'subscription.startedAt': now,
+          'subscription.expiresAt': new Date(now.getTime() + 24 * 60 * 60 * 1000), // 1 day
+          'subscription.isActive': true,
+          'subscription.limits': {
+            jdUploads: 1,
+            resumeUploads: 10,
+            assessments: 1
+          }
+        };
+        break;
+      
+      case 'free':
+        updateData = {
+          'subscription.plan': 'free',
+          'subscription.startedAt': now,
+          'subscription.expiresAt': null, // Never expires
+          'subscription.isActive': true,
+          'subscription.limits': {
+            jdUploads: 10,
+            resumeUploads: 100,
+            assessments: 10
+          }
+        };
+        break;
+      
+      case 'paid':
+        if (!months || months < 1) {
+          return res.status(400).json({ error: 'Please specify valid number of months' });
+        }
+        updateData = {
+          'subscription.plan': 'paid',
+          'subscription.startedAt': now,
+          'subscription.expiresAt': new Date(now.getTime() + months * 30 * 24 * 60 * 60 * 1000),
+          'subscription.isActive': true,
+          'subscription.limits': {
+            jdUploads: 1000,
+            resumeUploads: 10000,
+            assessments: 1000
+          }
+        };
+        break;
+      
+      default:
+        return res.status(400).json({ error: 'Invalid plan type' });
+    }
+
+    const user = await User.findByIdAndUpdate(
+      userId,
+      updateData,
+      { new: true }
+    );
+
+    res.status(200).json({ 
+      success: true,
+      user: {
+        id: user._id,
+        email: user.email,
+        subscription: user.subscription
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ 
+      success: false,
+      message: 'Failed to update subscription',
+      error: error.message 
+    });
+  }
+});
 // Admin approve user endpoint
 app.post('/admin/approve-user/:userId', authenticateJWT, isAdmin, async (req, res) => {
   try {
@@ -2579,7 +2779,7 @@ const saveAdmin = async () => {
     const adminEmail = process.env.ADMIN_EMAIL || 'skillmatrixai@gmail.com';
     const adminPassword = process.env.ADMIN_PASSWORD || 'admin@123';
     
-    const admin = {
+    const adminData = {
       fullName: process.env.ADMIN_FULLNAME || 'Admin User',
       email: adminEmail,
       password: await bcrypt.hash(adminPassword, 10),
@@ -2589,15 +2789,32 @@ const saveAdmin = async () => {
       isEmailVerified: true,
       isAdmin: true,
       isApproved: true,
-      isUnlimited: true,
+      subscription: {
+        plan: 'paid',
+        expiresAt: null, // Never expires for admin
+        isActive: true
+      }
     };
 
     const existingAdmin = await User.findOne({ email: adminEmail });
     if (existingAdmin) {
-      await User.findOneAndUpdate({ email: adminEmail }, admin);
+      // Update existing admin with new schema
+      await User.findOneAndUpdate(
+        { email: adminEmail },
+        { 
+          ...adminData,
+          // Remove old fields if they exist
+          $unset: {
+            trialStart: "",
+            trialEnd: "",
+            isUnlimited: ""
+          }
+        },
+        { new: true }
+      );
       console.log('Admin user updated');
     } else {
-      await User.create(admin);
+      await User.create(adminData);
       console.log('Admin user created');
     }
   } catch (error) {
