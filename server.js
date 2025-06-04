@@ -9,6 +9,7 @@ const crypto = require('crypto'); // For hash calculation
 const { Schema } = mongoose;
 const os = require("os"); // Added for cross-platform temp dir
 const http = require('http');
+
 const { Server } = require('socket.io');
 const fs = require('fs');
 const path = require('path');
@@ -49,13 +50,9 @@ app.use(cookieParser());
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
-// MongoDB Connection
-// Rate limiting to prevent brute-force attacks
-const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 900, // Limit each IP to 900 requests per windowMs
-});
-app.use(limiter);
+// In server.js - Replace the rate limiter setu
+
+
 
 mongoose
 .connect(process.env.MONGO_URI)
@@ -85,7 +82,6 @@ const audioUpload = multer({
 
 const upload = multer({ storage: memoryStorage });
 // User Model
-// User Schema with approval status
 const userSchema = new mongoose.Schema({
   fullName: { type: String, required: true },
   email: { type: String, required: true, unique: true },
@@ -95,45 +91,31 @@ const userSchema = new mongoose.Schema({
   designation: { type: String, required: true },
   isEmailVerified: { type: Boolean, default: false },
   isAdmin: { type: Boolean, default: false },
-  isApproved: { type: Boolean, default: false }, // New field for admin approval
-  trialStart: { type: Date, default: Date.now },
-  trialEnd: { type: Date },
-  isUnlimited: { type: Boolean, default: false },
- subscription: {
-    type: {
-      plan: { 
-        type: String, 
-        enum: ['trial', 'free', 'paid'], 
-        default: 'trial',
-        required: true
-      },
-      startedAt: { type: Date, default: Date.now },
-      expiresAt: { type: Date },
-      isActive: { type: Boolean, default: true },
-      limits: {
-        jdUploads: { type: Number, default: 1 },
-        resumeUploads: { type: Number, default: 10 },
-        assessments: { type: Number, default: 1 }
-      }
+  isApproved: { type: Boolean, default: false },
+  // Removed isUnlimited field as it's redundant
+  subscription: {
+    plan: { 
+      type: String, 
+      enum: ['trial', 'free', 'paid', 'admin'], 
+      default: 'trial',
+      required: true
     },
-    default: () => ({
-      plan: 'trial',
-      startedAt: Date.now(),
-      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000), // 1 day trial
-      isActive: true,
-      limits: {
-        jdUploads: 1,
-        resumeUploads: 10,
-        assessments: 1
-      }
-    })
+    startedAt: { type: Date, default: Date.now },
+    expiresAt: { type: Date },
+    isActive: { type: Boolean, default: true },
+    // Limits only exist for trial/free users
+    limits: {
+      jdUploads: { type: Number },
+      resumeUploads: { type: Number },
+      assessments: { type: Number }
+    }
   },
   usage: {
     jdUploads: { type: Number, default: 0 },
     resumeUploads: { type: Number, default: 0 },
     assessments: { type: Number, default: 0 }
   },
-  // Removed: isUnlimited, trialEnd, trialStart
+ 
 }, { timestamps: true });
 
 const User = mongoose.model('User', userSchema);
@@ -424,54 +406,111 @@ const calculateHash = (buffer) => {
 /* relared to the subscription */
 // Subscription check middleware
 // Updated checkSubscription middleware
+// Enhanced checkSubscription middleware
 const checkSubscription = async (req, res, next) => {
-  const user = await User.findById(req.user.id);
-  
-  // Skip all checks for admin
-  if (user.isAdmin) return next();
+  try {
+    const user = await User.findById(req.user.id);
+    
+    // Admins bypass all checks
+    if (user.isAdmin) return next();
 
-  // Check if subscription is inactive
-  if (!user.subscription.isActive) {
-    return res.status(403).json({ 
-      message: 'Subscription inactive. Please contact admin.' 
-    });
+    // Check if subscription exists and is active
+    if (!user.subscription || !user.subscription.isActive) {
+      return res.status(403).json({ 
+        message: 'Subscription inactive. Please contact admin.' 
+      });
+    }
+
+    // Check if subscription expired
+    if (user.subscription.expiresAt && new Date() > user.subscription.expiresAt) {
+      // Automatically downgrade to trial if paid subscription expires
+      if (user.subscription.plan === 'paid') {
+        await downgradeToTrial(user._id);
+      }
+      return res.status(403).json({ 
+        message: 'Subscription expired. Please renew your plan.' 
+      });
+    }
+
+    next();
+  } catch (error) {
+    console.error('Subscription check error:', error);
+    res.status(500).json({ error: 'Internal server error' });
   }
-
-  // Check if subscription expired
-  if (user.subscription.expiresAt && new Date() > user.subscription.expiresAt) {
-    return res.status(403).json({ 
-      message: 'Subscription expired. Please renew your plan.' 
-    });
-  }
-
-  next();
 };
 
+// Helper function to downgrade to trial
+async function downgradeToTrial(userId) {
+  const now = new Date();
+  await User.findByIdAndUpdate(userId, {
+    $unset: {
+      isUnlimited: ""
+    },
+    subscription: {
+      plan: 'trial',
+      startedAt: now,
+      expiresAt: new Date(now.getTime() + 24 * 60 * 60 * 1000), // 1 day
+      isActive: true,
+      limits: {
+        jdUploads: 1,
+        resumeUploads: 5,
+        assessments: 1
+      }
+    },
+    trialStart: now,
+    trialEnd: new Date(now.getTime() + 24 * 60 * 60 * 1000),
+    usage: {
+      jdUploads: 0,
+      resumeUploads: 0,
+      assessments: 0
+    }
+  });
+}
 // Updated usage limit middleware
+
+// Enhanced checkUsageLimits middleware
 const checkUsageLimits = (type) => async (req, res, next) => {
-  const user = await User.findById(req.user.id);
-  
-  // Skip all checks for admin
-  if (user.isAdmin) return next();
+  try {
+    const user = await User.findById(req.user.id);
+    
+    // Skip all checks for admin
+    if (user.isAdmin) return next();
 
-  // Free and paid plans have no limits
-  if (user.subscription.plan !== 'trial') return next();
-  
-  // Check if expired
-  if (user.subscription.expiresAt && new Date() > user.subscription.expiresAt) {
-    return res.status(403).json({ 
-      message: 'Subscription expired. Please renew your plan.' 
-    });
-  }
-  
-  // For trial users only - check usage
-  if (user.usage[type] >= getTrialLimit(type)) {
-    return res.status(403).json({ 
-      message: `You've reached your ${type} limit for your trial period.` 
-    });
-  }
+    // Skip checks for paid users without limits
+    if (user.subscription.plan === 'paid' && !user.subscription.limits) {
+      return next();
+    }
 
-  next();
+    // Check if subscription exists and is active
+    if (!user.subscription || !user.subscription.isActive) {
+      return res.status(403).json({ 
+        message: 'Subscription inactive. Please contact admin.' 
+      });
+    }
+
+    // Check if expired
+    if (user.subscription.expiresAt && new Date() > user.subscription.expiresAt) {
+      // Auto-downgrade to trial if paid subscription expires
+      if (user.subscription.plan === 'paid') {
+        await downgradeToTrial(user._id);
+      }
+      return res.status(403).json({ 
+        message: 'Subscription expired. Please renew your plan.' 
+      });
+    }
+
+    // Check usage against limits (only for trial/free users)
+    if (user.subscription.limits && user.usage[type] >= user.subscription.limits[type]) {
+      return res.status(403).json({ 
+        message: `You've reached your ${type} limit for your current plan.` 
+      });
+    }
+
+    next();
+  } catch (error) {
+    console.error('Usage limit check error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 };
 
 // Helper function for trial limits
@@ -1437,7 +1476,7 @@ app.post('/api/generate-voice-questions', async (req, res) => {
 
 // Test link generator //
 // Updated send-test-link endpoint with NodeMailer
-app.post('/api/send-test-link', authenticateJWT,checkSubscription,checkUsageLimits('assessments'), async (req, res) => {
+app.post('/api/send-test-link', authenticateJWT, checkSubscription, checkUsageLimits('assessments'), async (req, res) => {
   const { candidateEmail, jobTitle, resumeId, jobDescriptionId, questions, voiceQuestions } = req.body;
   
   // Enhanced validation
@@ -1480,6 +1519,12 @@ app.post('/api/send-test-link', authenticateJWT,checkSubscription,checkUsageLimi
       jobDescriptionId
     });
     await session.save();
+
+     // Increment assessment count
+    await User.findByIdAndUpdate(req.user.id, {
+      $inc: { 'usage.assessments': 1 }
+    });
+
 
     // Create NodeMailer transporter
     const transporter = nodemailer.createTransport({
@@ -2469,7 +2514,7 @@ app.get('/verify-email', async (req, res) => {
     }
 
     // Send success response
-    return res.status(200).json({ 
+       return res.status(200).json({ 
       success: true,
       message: 'Email verified successfully! Your account is now pending admin approval. You will receive an email once approved.'
     });
@@ -2501,83 +2546,61 @@ app.get('/admin', authenticateJWT, isAdmin, async (req, res) => {
     res.status(500).json({ message: 'Server error.' });
   }
 });
-// Admin subscription management
-// Update subscription management endpoint
-// Update subscription management endpoint
-// Updated subscription management endpoint
 app.put('/admin/update-subscription/:userId', authenticateJWT, isAdmin, async (req, res) => {
   try {
     const { plan, months } = req.body;
     const userId = req.params.userId;
-
-    // Calculate expiration date and limits based on plan
-    let updateData = {};
     const now = new Date();
+
+    const updateData = {
+      subscription: {
+        plan,
+        startedAt: now,
+        isActive: true
+      },
+      usage: { jdUploads: 0, resumeUploads: 0, assessments: 0 } // Reset usage
+    };
 
     switch(plan) {
       case 'trial':
-        updateData = {
-          'subscription.plan': 'trial',
-          'subscription.startedAt': now,
-          'subscription.expiresAt': new Date(now.getTime() + 24 * 60 * 60 * 1000), // 1 day
-          'subscription.isActive': true,
-          'subscription.limits': {
-            jdUploads: 1,
-            resumeUploads: 10,
-            assessments: 1
-          }
+        updateData.subscription.expiresAt = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+        updateData.subscription.limits = {
+          jdUploads: 1,
+          resumeUploads: 5,
+          assessments: 1
         };
         break;
-      
+
       case 'free':
-        updateData = {
-          'subscription.plan': 'free',
-          'subscription.startedAt': now,
-          'subscription.expiresAt': null, // Never expires
-          'subscription.isActive': true,
-          'subscription.limits': {
-            jdUploads: 10,
-            resumeUploads: 100,
-            assessments: 10
-          }
+        updateData.subscription.expiresAt = null; // Never expires
+        updateData.subscription.limits = {
+          jdUploads: 10,
+          resumeUploads: 50,
+          assessments: 5
         };
         break;
-      
+
       case 'paid':
-        if (!months || months < 1) {
-          return res.status(400).json({ error: 'Please specify valid number of months' });
-        }
-        updateData = {
-          'subscription.plan': 'paid',
-          'subscription.startedAt': now,
-          'subscription.expiresAt': new Date(now.getTime() + months * 30 * 24 * 60 * 60 * 1000),
-          'subscription.isActive': true,
-          'subscription.limits': {
-            jdUploads: 1000,
-            resumeUploads: 10000,
-            assessments: 1000
-          }
-        };
+        if (!months) return res.status(400).json({ error: 'Months required' });
+        updateData.subscription.expiresAt = new Date(now.getTime() + months * 30 * 24 * 60 * 60 * 1000);
+        updateData.subscription.$unset = { limits: "" }; // No limits for paid
         break;
-      
-      default:
-        return res.status(400).json({ error: 'Invalid plan type' });
     }
 
     const user = await User.findByIdAndUpdate(
       userId,
-      updateData,
+      { 
+        ...updateData,
+        $unset: { 
+          trialStart: "", 
+          trialEnd: "", 
+          isUnlimited: "" 
+        }
+      },
       { new: true }
     );
 
-    res.status(200).json({ 
-      success: true,
-      user: {
-        id: user._id,
-        email: user.email,
-        subscription: user.subscription
-      }
-    });
+    res.status(200).json({ success: true, user });
   } catch (error) {
     res.status(500).json({ 
       success: false,
@@ -2774,6 +2797,7 @@ app.get('/user', authenticateJWT, async (req, res) => {
 // Save admin details on startup
 
 // Save admin details on startup with enhanced error handling
+// Updated saveAdmin function
 const saveAdmin = async () => {
   try {
     const adminEmail = process.env.ADMIN_EMAIL || 'skillmatrixai@gmail.com';
@@ -2789,27 +2813,26 @@ const saveAdmin = async () => {
       isEmailVerified: true,
       isAdmin: true,
       isApproved: true,
+      // Admin has no subscription limits at all
       subscription: {
-        plan: 'paid',
-        expiresAt: null, // Never expires for admin
-        isActive: true
+        plan: 'admin',
+        isActive: true,
+        // No limits object for admin
+        startedAt: new Date()
+      },
+      // Clear all trial fields for admin
+      $unset: {
+        trialStart: "",
+        trialEnd: "",
+        isUnlimited: ""
       }
     };
 
     const existingAdmin = await User.findOne({ email: adminEmail });
     if (existingAdmin) {
-      // Update existing admin with new schema
       await User.findOneAndUpdate(
         { email: adminEmail },
-        { 
-          ...adminData,
-          // Remove old fields if they exist
-          $unset: {
-            trialStart: "",
-            trialEnd: "",
-            isUnlimited: ""
-          }
-        },
+        adminData,
         { new: true }
       );
       console.log('Admin user updated');
