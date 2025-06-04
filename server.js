@@ -469,6 +469,7 @@ async function downgradeToTrial(userId) {
 // Updated usage limit middleware
 
 // Enhanced checkUsageLimits middleware
+// Enhanced checkUsageLimits middleware
 const checkUsageLimits = (type) => async (req, res, next) => {
   try {
     const user = await User.findById(req.user.id);
@@ -490,16 +491,12 @@ const checkUsageLimits = (type) => async (req, res, next) => {
 
     // Check if expired
     if (user.subscription.expiresAt && new Date() > user.subscription.expiresAt) {
-      // Auto-downgrade to trial if paid subscription expires
-      if (user.subscription.plan === 'paid') {
-        await downgradeToTrial(user._id);
-      }
       return res.status(403).json({ 
         message: 'Subscription expired. Please renew your plan.' 
       });
     }
 
-    // Check usage against limits (only for trial/free users)
+    // Check usage against limits
     if (user.subscription.limits && user.usage[type] >= user.subscription.limits[type]) {
       return res.status(403).json({ 
         message: `You've reached your ${type} limit for your current plan.` 
@@ -2514,7 +2511,7 @@ app.get('/verify-email', async (req, res) => {
     }
 
     // Send success response
-       return res.status(200).json({ 
+   return res.status(200).json({ 
       success: true,
       message: 'Email verified successfully! Your account is now pending admin approval. You will receive an email once approved.'
     });
