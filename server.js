@@ -39,12 +39,19 @@ const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: '*' } });
 
 // Middleware
-app.use(
-  cors({
-    origin: process.env.FRONTEND_URL,
-    credentials: true, // needed for cookies, auth headers, etc.
-  })
-);
+
+const corsOptions = {
+  origin: [
+    'https://skillmatrixai.com',
+    'https://www.skillmatrixai.com'
+  ],
+  methods: ['GET', 'POST', 'PUT', 'DELETE'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true,
+  optionsSuccessStatus: 200
+};
+
+app.use(cors(corsOptions));
 app.use(express.json());
 app.use(cookieParser());
 app.use(bodyParser.json());
