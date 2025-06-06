@@ -39,12 +39,19 @@ const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: '*' } });
 
 // Middleware
-app.use(
-  cors({
-    origin: process.env.FRONTEND_URL,
-    credentials: true, // needed for cookies, auth headers, etc.
-  })
-);
+
+const corsOptions = {
+  origin: [
+    'https://skillmatrixai.com',
+    'https://www.skillmatrixai.com'
+  ],
+  methods: ['GET', 'POST', 'PUT', 'DELETE'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true,
+  optionsSuccessStatus: 200
+};
+
+app.use(cors(corsOptions));
 app.use(express.json());
 app.use(cookieParser());
 app.use(bodyParser.json());
@@ -1199,16 +1206,27 @@ async function streamToBuffer(stream) {
 }
 
 // Enhanced upload to S3 with retries
-async function uploadToS3(fileStream, key, contentType) {
+async function uploadToS3(fileData, key, contentType) {
   try {
+    // Ensure we have valid file data
+    if (!fileData) {
+      throw new Error('No file data provided');
+    }
+
+    // Convert buffer to stream if needed
+    const body = fileData instanceof Buffer ? Readable.from(fileData) : fileData;
+
     const upload = new Upload({
       client: s3,
       params: {
         Bucket: process.env.S3_BUCKET_NAME,
         Key: key,
-        Body: fileStream,
+        Body: body,
         ContentType: contentType
       },
+      queueSize: 4, // Optional concurrency configuration
+      partSize: 1024 * 1024 * 5, // Optional part size (5MB)
+      leavePartsOnError: false // Clean up failed uploads
     });
 
     upload.on('httpUploadProgress', progress => {
@@ -1218,11 +1236,16 @@ async function uploadToS3(fileStream, key, contentType) {
     const result = await upload.done();
     return result;
   } catch (error) {
-    console.error('Error uploading to S3:', error);
+    console.error('Error uploading to S3:', {
+      message: error.message,
+      stack: error.stack,
+      key: key,
+      contentType: contentType,
+      timestamp: new Date().toISOString()
+    });
     throw error;
   }
 }
-
 
 
 
@@ -1920,7 +1943,7 @@ app.post('/api/submit-voice-answer', (req, res) => {
         return res.status(400).json({ error: err.message });
       }
       
-      if (!req.file) {
+      if (!req.file && !skipped) {
         return res.status(400).json({ error: 'No audio file uploaded' });
       }
 
@@ -1930,11 +1953,10 @@ app.post('/api/submit-voice-answer', (req, res) => {
       });
       
       if (!session) {
-        fs.unlinkSync(req.file.path); // Cleanup uploaded file
         return res.status(404).json({ error: 'Session not found' });
       }
 
-      // Handle skipped questions differently
+      // Handle skipped questions
       if (skipped) {
         const voiceAnswer = new VoiceAnswer({
           questionId,
@@ -1955,42 +1977,51 @@ app.post('/api/submit-voice-answer', (req, res) => {
         });
       }
 
-// Validate audio before upload
+      // Validate audio before upload
       const validation = await validateAudio(req.file.buffer);
-      const s3Key = validation.valid 
-        ? `audio/answer_${Date.now()}.wav`
-        : null;
+      const s3Key = `audio/answer_${Date.now()}_${questionId}.wav`;
 
-
-      // Upload to S3
-      // Upload to S3 with explicit WAV MIME type
-     await uploadToS3(Readable.from(req.file.buffer), s3Key, 'audio/wav');
+      // Create voice answer document first
       const voiceAnswer = new VoiceAnswer({
         questionId,
         question,
-        audioPath: s3Key,
+        audioPath: validation.valid ? s3Key : null,
         durationSec: req.file.buffer.length / (16000 * 2),
         answered: true,
         valid: validation.valid,
         processingStatus: validation.valid ? 'pending' : 'skipped',
-        skipReason: validation.reason, // Add this field to your schema
+        skipReason: validation.reason,
         assessmentSession: session._id
       });
 
       await voiceAnswer.save();
+
+      // Only proceed with upload and processing if audio is valid
+      if (validation.valid) {
+        try {
+          // Create a fresh stream from the buffer
+          const audioStream = Readable.from(req.file.buffer);
+          
+          // Upload to S3 with explicit WAV MIME type
+          await uploadToS3(audioStream, s3Key, 'audio/wav');
+          
+          // Start transcription in background
+          processTranscription(voiceAnswer._id).catch(transcriptionError => {
+            console.error('Transcription processing failed:', transcriptionError);
+          });
+        } catch (uploadError) {
+          console.error('Audio upload failed:', uploadError);
+          // Update status if upload fails
+          await VoiceAnswer.findByIdAndUpdate(voiceAnswer._id, {
+            processingStatus: 'failed',
+            skipReason: 'upload_failed'
+          });
+          throw uploadError;
+        }
+      }
+
       session.voiceAnswers.push(voiceAnswer._id);
       await session.save();
-
-   // Only upload and process valid audio
-     if (validation.valid) {
-  await uploadToS3(Readable.from(req.file.buffer), s3Key, 'audio/wav');
-  processTranscription(voiceAnswer._id).catch(err => {
-    console.error('Transcription processing failed:', err);
-  });
-} else {
-  console.log(`Skipped processing for silent/short answer: ${validation.reason}`);
-}
-
       
       // Trigger audio analysis in background
       setTimeout(async () => {
