@@ -38,5 +38,5 @@ EXPOSE 5000
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup
 USER appuser
 
-# Start your Node app
+
 CMD ["npm", "start"]
