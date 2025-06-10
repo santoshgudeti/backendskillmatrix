@@ -1,3 +1,4 @@
+
 const express = require('express');
 const mongoose = require('mongoose');
 const multer = require('multer');
@@ -39,22 +40,12 @@ const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: '*' } });
 
 // Middleware
-
-const corsOptions = {
-  origin: [
-    'https://skillmatrixai.com',
-    'https://www.skillmatrixai.com'
-  ],
-  methods: ['GET', 'POST', 'PUT', 'DELETE'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-  credentials: true,
-  optionsSuccessStatus: 200
-};
-
-app.use(cors(corsOptions));
-
-// For preflight requests
-app.options('*', cors(corsOptions));
+app.use(
+  cors({
+    origin: process.env.FRONTEND_URL,
+    credentials: true, // needed for cookies, auth headers, etc.
+  })
+);
 app.use(express.json());
 app.use(cookieParser());
 app.use(bodyParser.json());
@@ -882,27 +873,23 @@ async function getSignedUrlForS3(key) {
 // Enhanced processTranscription with proper temp file handling
 // Enhanced processTranscription with robust temp file handling
 async function processTranscription(answerId) {
-  let tempDir;
   try {
     const answer = await VoiceAnswer.findById(answerId);
     if (!answer) {
       throw new Error('Voice answer not found');
     }
-  // Skip if audio was marked invalid
+
     // Skip if answer was marked as skipped or invalid
     if (!answer.valid || answer.processingStatus === 'skipped') {
-      console.log(`Skipping transcription for answer ${answerId} (status: ${answer.processingStatus})`);
+      console.log(`Skipping transcription for answer ${answerId}`);
       return;
     }
 
     // Get audio stream from S3
     const { stream: audioStream } = await getS3ReadStream(answer.audioPath);
-    
-    // Create a buffer from the stream with timeout
     const audioBuffer = await streamToBuffer(audioStream);
-    
-  
-     // Re-validate audio in case something changed
+
+    // Validate audio
     const validation = await validateAudio(audioBuffer);
     if (!validation.valid) {
       await VoiceAnswer.findByIdAndUpdate(answerId, {
@@ -911,78 +898,36 @@ async function processTranscription(answerId) {
       });
       return;
     }
-    // Create temp directory using os.tmpdir() for cross-platform compatibility
-    tempDir = path.join(os.tmpdir(), `whisper_${Date.now()}_${answerId}`);
-    fs.mkdirSync(tempDir, { recursive: true });
 
-    // Define output file path
-    const outputFile = path.join(tempDir, 'transcription.txt');
-
-    // Run whisper with explicit output directory
-    const transcriptionText = await new Promise((resolve, reject) => {
-      const whisperProcess = exec(
-        `whisper - --model base --output_format txt --language en --fp16 False --output_dir ${tempDir}`,
-       
-      );
-
-      // Handle process events
-      let stdoutData = '';
-      let stderrData = '';
-
-      whisperProcess.stdout.on('data', (data) => {
-        stdoutData += data.toString();
-      });
-
-      whisperProcess.stderr.on('data', (data) => {
-        stderrData += data.toString();
-      });
-
-      whisperProcess.on('close', (code) => {
-        if (code === 0) {
-          // First try to read from output file
-          if (fs.existsSync(outputFile)) {
-            try {
-              const fileContent = fs.readFileSync(outputFile, 'utf-8');
-              resolve(fileContent);
-            } catch (readError) {
-              // Fallback to stdout if file read fails
-              console.warn('Failed to read output file, falling back to stdout:', readError);
-              resolve(stdoutData);
-            }
-          } else {
-            // No file produced, use stdout
-            resolve(stdoutData);
-          }
-        } else {
-          reject(new Error(`Whisper failed with code ${code}: ${stderrData}`));
-        }
-      });
-
-      whisperProcess.on('error', (err) => {
-        reject(new Error(`Whisper process error: ${err.message}`));
-      });
-
-      // Pipe audio buffer to Whisper
-      const audioReadable = Readable.from(audioBuffer);
-      audioReadable.pipe(whisperProcess.stdin);
+    // Create form data for Flask service
+    const form = new FormData();
+    form.append('audio', audioBuffer, {
+      filename: `answer_${answerId}.wav`,
+      contentType: 'audio/wav'
     });
 
-    // Clean and validate transcription
-    const cleanTranscription = cleanTranscriptionText(transcriptionText);
-    if (!cleanTranscription || cleanTranscription.trim() === '') {
-      throw new Error('Transcription resulted in empty text');
+    // Call Flask Whisper service
+const response = await axios.post(`${process.env.WHISPER_API_URL}/transcribe`, form, {
+  headers: form.getHeaders(),
+  maxContentLength: Infinity,
+  maxBodyLength: Infinity,
+});
+
+    const { text } = response.data;
+    if (!text) {
+      throw new Error('Empty transcription result');
     }
 
-    // Upload to S3
+    // Upload transcription to S3
     const transcriptionKey = `transcripts/${answerId}.txt`;
-    await uploadToS3(Buffer.from(cleanTranscription), transcriptionKey, 'text/plain');
+    await uploadToS3(Buffer.from(text), transcriptionKey, 'text/plain');
 
     // Update database
     const updatedAnswer = await VoiceAnswer.findByIdAndUpdate(
       answerId,
       {
         transcriptionPath: transcriptionKey,
-        answer: cleanTranscription,
+        answer: text,
         processingStatus: 'completed'
       },
       { new: true }
@@ -991,7 +936,7 @@ async function processTranscription(answerId) {
     console.log(`✅ Transcription completed for answer ${answerId}`);
 
     // Evaluate text response if possible
-    if (updatedAnswer.question && cleanTranscription) {
+    if (updatedAnswer.question && text) {
       try {
         await VoiceAnswer.findByIdAndUpdate(answerId, {
           'textEvaluation.status': 'processing'
@@ -999,7 +944,7 @@ async function processTranscription(answerId) {
 
         const evaluation = await evaluateTextResponse(
           updatedAnswer.question, 
-          cleanTranscription
+          text
         );
         
         await VoiceAnswer.findByIdAndUpdate(answerId, {
@@ -1013,39 +958,20 @@ async function processTranscription(answerId) {
         await calculateAndStoreScores(updatedAnswer.assessmentSession);
       } catch (evalError) {
         console.error('Text evaluation failed:', evalError);
-            console.error(`Transcription failed for answer ${answerId}:`, evalError);
         await VoiceAnswer.findByIdAndUpdate(answerId, {
-          'textEvaluation.status': 'failed',
-           skipReason: error.message.substring(0, 200) // Truncate long error messages
+          'textEvaluation.status': 'failed'
         });
-        // Don't fail the whole process for evaluation errors
       }
     }
 
   } catch (error) {
-    console.error('Transcription processing error:', error);
-    
-    // Update status in database
+    console.error(`Transcription failed for answer ${answerId}:`, error);
     await VoiceAnswer.findByIdAndUpdate(answerId, {
       processingStatus: 'failed',
-      $set: {
-        'audioAnalysis.status': 'failed',
-        'textEvaluation.status': 'failed'
-      }
+      skipReason: error.message.substring(0, 200)
     });
-
- return;
-  } finally {
-    if (tempDir && fs.existsSync(tempDir)) {
-      try {
-        fs.rmSync(tempDir, { recursive: true, force: true });
-      } catch (cleanupError) {
-        console.error('Failed to clean up temp directory:', cleanupError);
-      }
-    }
   }
 }
-
 // Helper function to clean transcription text
 function cleanTranscriptionText(rawText) {
   if (!rawText) return '';
