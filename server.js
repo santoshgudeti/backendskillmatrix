@@ -40,18 +40,12 @@ const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: '*' } });
 
 // Middleware
-const corsOptions = {
-  origin: [
-    'https://skillmatrixai.com',
-    'https://www.skillmatrixai.com'
-  ],
-  methods: ['GET', 'POST', 'PUT', 'DELETE'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-  credentials: true,
-  optionsSuccessStatus: 200
-};
-
-app.use(cors(corsOptions));
+app.use(
+  cors({
+    origin: process.env.FRONTEND_URL,
+    credentials: true, // needed for cookies, auth headers, etc.
+  })
+);
 
 
 
@@ -881,7 +875,60 @@ async function getSignedUrlForS3(key) {
   return getSignedUrl(s3, command); // 1 hour
 }
 // Enhanced processTranscription with proper temp file handling
-// Enhanced processTranscription with robust temp file handling
+// Enhanced audio validation with better silence detection
+async function validateAudio(audioBuffer) {
+  try {
+    const MIN_AUDIO_LENGTH = 2000; // 2 seconds minimum
+    const SILENCE_THRESHOLD = 0.01; // More sensitive threshold
+    
+    // Check buffer size first
+    if (!audioBuffer || audioBuffer.length < MIN_AUDIO_LENGTH) {
+      return { valid: false, reason: 'Audio too short' };
+    }
+
+    // Advanced silence detection using Web Audio API (if available)
+    try {
+      const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      const buffer = await audioContext.decodeAudioData(audioBuffer.buffer.slice(0));
+      
+      // Calculate RMS (Root Mean Square) for better silence detection
+      let sum = 0;
+      const channelData = buffer.getChannelData(0);
+      const sampleSize = Math.min(channelData.length, 44100); // Check first second
+      
+      for (let i = 0; i < sampleSize; i++) {
+        sum += channelData[i] * channelData[i];
+      }
+      
+      const rms = Math.sqrt(sum / sampleSize);
+      
+      return { 
+        valid: rms > SILENCE_THRESHOLD,
+        reason: rms > SILENCE_THRESHOLD ? '' : 'No speech detected (silent audio)'
+      };
+    } catch (webAudioError) {
+      // Fallback to simpler validation if Web Audio API fails
+      const view = new DataView(audioBuffer.buffer);
+      let sum = 0;
+      const sampleSize = Math.min(audioBuffer.length, 44100 * 2); // Check first second (16-bit samples)
+      
+      for (let i = 0; i < sampleSize; i += 2) {
+        const sample = view.getInt16(i, true);
+        sum += sample * sample;
+      }
+      
+      const rms = Math.sqrt(sum / (sampleSize / 2)) / 32768;
+      return {
+        valid: rms > SILENCE_THRESHOLD,
+        reason: rms > SILENCE_THRESHOLD ? '' : 'No speech detected (silent audio)'
+      };
+    }
+  } catch (error) {
+    return { valid: false, reason: 'Audio validation error' };
+  }
+}
+
+// Enhanced processTranscription with silent audio handling
 async function processTranscription(answerId) {
   try {
     const answer = await VoiceAnswer.findById(answerId);
@@ -890,22 +937,63 @@ async function processTranscription(answerId) {
     }
 
     // Skip if answer was marked as skipped or invalid
-    if (!answer.valid || answer.processingStatus === 'skipped') {
+    if (answer.processingStatus === 'skipped' || !answer.valid) {
       console.log(`Skipping transcription for answer ${answerId}`);
       return;
     }
 
-    // Get audio stream from S3
-    const { stream: audioStream } = await getS3ReadStream(answer.audioPath);
-    const audioBuffer = await streamToBuffer(audioStream);
-
-    // Validate audio
-    const validation = await validateAudio(audioBuffer);
-    if (!validation.valid) {
+    // Validate audio path exists
+    if (!answer.audioPath) {
       await VoiceAnswer.findByIdAndUpdate(answerId, {
         processingStatus: 'failed',
-        skipReason: validation.reason
+        skipReason: 'Missing audio file',
+        $set: {
+          'audioAnalysis.status': 'failed',
+          'textEvaluation.status': 'failed'
+        }
       });
+      return;
+    }
+
+    // Get audio stream from S3
+    let audioBuffer;
+    try {
+      const { stream: audioStream } = await getS3ReadStream(answer.audioPath);
+      audioBuffer = await streamToBuffer(audioStream);
+      
+      // Check if audio buffer is empty or too small
+      if (!audioBuffer || audioBuffer.length < 1024) {
+        throw new Error('Audio file is too small or empty');
+      }
+    } catch (streamError) {
+      await VoiceAnswer.findByIdAndUpdate(answerId, {
+        processingStatus: 'failed',
+        skipReason: 'Failed to load audio file',
+        $set: {
+          'audioAnalysis.status': 'failed',
+          'textEvaluation.status': 'failed'
+        }
+      });
+      return;
+    }
+
+    // Enhanced audio validation
+    const validation = await validateAudio(audioBuffer);
+    if (!validation.valid) {
+      const isSilentAudio = validation.reason.includes('silent');
+      
+      await VoiceAnswer.findByIdAndUpdate(answerId, {
+        processingStatus: isSilentAudio ? 'completed' : 'failed',
+        answer: isSilentAudio ? '[SILENT_AUDIO]' : undefined,
+        skipReason: validation.reason,
+        $set: {
+          'audioAnalysis.status': isSilentAudio ? 'completed' : 'failed',
+          'textEvaluation.status': isSilentAudio ? 'skipped' : 'failed',
+          'textEvaluation.skipReason': isSilentAudio ? 'Silent audio - no speech detected' : undefined
+        }
+      });
+      
+      console.log(`Audio validation ${isSilentAudio ? 'completed (silent)' : 'failed'} for answer ${answerId}`);
       return;
     }
 
@@ -916,37 +1004,68 @@ async function processTranscription(answerId) {
       contentType: 'audio/wav'
     });
 
-    // Call Flask Whisper service
-const response = await axios.post(`${process.env.WHISPER_API_URL}/transcribe`, form, {
-  headers: form.getHeaders(),
-  maxContentLength: Infinity,
-  maxBodyLength: Infinity,
-});
-
-    const { text } = response.data;
-    if (!text) {
-      throw new Error('Empty transcription result');
+    // Call Whisper service with timeout
+    let response;
+    try {
+      response = await axios.post(
+        `${process.env.WHISPER_API_URL}/transcribe`, 
+        form, 
+        {
+          headers: form.getHeaders(),
+          timeout: 30000,
+          maxContentLength: Infinity,
+          maxBodyLength: Infinity
+        }
+      );
+    } catch (apiError) {
+      throw new Error(`Transcription API failed: ${apiError.message}`);
     }
 
-    // Upload transcription to S3
-    const transcriptionKey = `transcripts/${answerId}.txt`;
-    await uploadToS3(Buffer.from(text), transcriptionKey, 'text/plain');
+    // Handle empty or invalid response
+    if (!response.data || typeof response.data.text !== 'string') {
+      throw new Error('Invalid transcription response format');
+    }
 
-    // Update database
+    const rawText = response.data.text;
+    const cleanedText = cleanTranscriptionText(rawText);
+
+    // Handle silent/empty results
+    if (!cleanedText || cleanedText.trim().length === 0) {
+      await VoiceAnswer.findByIdAndUpdate(answerId, {
+        processingStatus: 'completed',
+        answer: '[SILENT_AUDIO]',
+        transcriptionPath: null,
+        $set: {
+          'textEvaluation.status': 'skipped',
+          'textEvaluation.skipReason': 'Empty transcription result - no speech detected'
+        }
+      });
+      console.log(`Silent audio processed for answer ${answerId}`);
+      return;
+    }
+
+    // Upload transcription to S3 if we have valid text
+    const transcriptionKey = `transcripts/${answerId}.txt`;
+    await uploadToS3(Buffer.from(cleanedText), transcriptionKey, 'text/plain');
+
+    // Update database with successful transcription
     const updatedAnswer = await VoiceAnswer.findByIdAndUpdate(
       answerId,
       {
         transcriptionPath: transcriptionKey,
-        answer: text,
-        processingStatus: 'completed'
+        answer: cleanedText,
+        processingStatus: 'completed',
+        $set: {
+          'audioAnalysis.status': 'completed'
+        }
       },
       { new: true }
     );
 
     console.log(`✅ Transcription completed for answer ${answerId}`);
 
-    // Evaluate text response if possible
-    if (updatedAnswer.question && text) {
+    // Evaluate text response if we have a question and valid text
+    if (updatedAnswer.question && cleanedText && cleanedText !== '[SILENT_AUDIO]') {
       try {
         await VoiceAnswer.findByIdAndUpdate(answerId, {
           'textEvaluation.status': 'processing'
@@ -954,7 +1073,7 @@ const response = await axios.post(`${process.env.WHISPER_API_URL}/transcribe`, f
 
         const evaluation = await evaluateTextResponse(
           updatedAnswer.question, 
-          text
+          cleanedText
         );
         
         await VoiceAnswer.findByIdAndUpdate(answerId, {
@@ -969,7 +1088,8 @@ const response = await axios.post(`${process.env.WHISPER_API_URL}/transcribe`, f
       } catch (evalError) {
         console.error('Text evaluation failed:', evalError);
         await VoiceAnswer.findByIdAndUpdate(answerId, {
-          'textEvaluation.status': 'failed'
+          'textEvaluation.status': 'failed',
+          'textEvaluation.skipReason': evalError.message.substring(0, 200)
         });
       }
     }
@@ -978,29 +1098,54 @@ const response = await axios.post(`${process.env.WHISPER_API_URL}/transcribe`, f
     console.error(`Transcription failed for answer ${answerId}:`, error);
     await VoiceAnswer.findByIdAndUpdate(answerId, {
       processingStatus: 'failed',
-      skipReason: error.message.substring(0, 200)
+      skipReason: error.message.substring(0, 200),
+      $set: {
+        'audioAnalysis.status': 'failed',
+        'textEvaluation.status': 'failed'
+      }
     });
   }
 }
-// Helper function to clean transcription text
+
+// Enhanced text cleaning function
 function cleanTranscriptionText(rawText) {
   if (!rawText) return '';
   
-  // Split into lines and filter out metadata lines
+  // Handle Whisper's silent/empty indicators
+  const silentIndicators = ['[silence]', '[empty]', '[no speech]', '...'];
+  if (silentIndicators.some(indicator => rawText.toLowerCase().includes(indicator))) {
+    return '';
+  }
+
+  // Split into lines and filter out metadata
   const lines = rawText.split('\n').filter(line => {
     return !line.includes('Detecting language') && 
            !line.includes('Detected language') && 
            line.trim() !== '';
   });
 
-  // Remove timestamps from remaining lines
+  // Remove timestamps and special characters
   const cleanedLines = lines.map(line => {
-    return line.replace(/\[\d{2}:\d{2}\.\d{3} --> \d{2}:\d{2}\.\d{3}\]/g, '').trim();
+    return line
+      .replace(/\[\d{2}:\d{2}\.\d{3} --> \d{2}:\d{2}\.\d{3}\]/g, '')
+      .replace(/\[.*?\]/g, '')
+      .replace(/^\s+|\s+$/g, '')
+      .replace(/\s+/g, ' ');
   });
 
-  // Join back into single string
-  return cleanedLines.join(' ').trim();
+  // Join and final clean
+  let result = cleanedLines.join(' ').trim();
+  
+  // Final check for empty content
+  if (result === '' || result.length < 2) {
+    return '';
+  }
+
+  return result;
 }
+
+
+
 // New helper function for background tasks
 async function processBackgroundTasks(recording) {
   try {
@@ -1082,37 +1227,6 @@ async function calculateAndStoreVideoScore(sessionId) {
     return null;
   }
 }
-
-// Add this function near other helper functions
-async function validateAudio(audioBuffer) {
-  try {
-    const MIN_AUDIO_LENGTH = 2000; // Increased to 2 seconds minimum
-    const SILENCE_THRESHOLD = 0.02; // More sensitive threshold
-    
-    if (audioBuffer.length < MIN_AUDIO_LENGTH) {
-      return { valid: false, reason: 'Audio too short' };
-    }
-
-    // Calculate RMS (Root Mean Square) for better silence detection
-    let sum = 0;
-    const view = new DataView(audioBuffer.buffer);
-    
-    for (let i = 0; i < audioBuffer.length; i += 2) {
-      const sample = view.getInt16(i, true);
-      sum += sample * sample;
-    }
-    
-    const rms = Math.sqrt(sum / (audioBuffer.length / 2));
-    const normalizedRms = rms / 32768; // Normalize to -1 to 1 range
-    
-    return { 
-      valid: normalizedRms > SILENCE_THRESHOLD,
-      reason: normalizedRms > SILENCE_THRESHOLD ? '' : 'No speech detected (silent audio)'
-    };
-  } catch (error) {
-    return { valid: false, reason: 'Validation error' };
-  }
-} 
 
 const s3 = new S3Client({
   region: process.env.AWS_REGION,
