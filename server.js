@@ -56,6 +56,8 @@ app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
 // In server.js - Replace the rate limiter setu
+app.set('view engine', 'ejs');
+app.set('views', path.join(__dirname, 'views'));
 
 
 
@@ -2636,14 +2638,14 @@ app.get('/verify-email', async (req, res) => {
   const { token } = req.query;
 
   if (!token) {
-    return res.status(400).json({ 
-      success: false,
-      message: 'Verification token is required' 
+    return res.status(400).render('verifyError', {
+      errorMessage: 'Verification token is missing.'
     });
   }
 
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
+
     const user = await User.findOneAndUpdate(
       { email: decoded.email },
       { isEmailVerified: true },
@@ -2651,32 +2653,24 @@ app.get('/verify-email', async (req, res) => {
     );
 
     if (!user) {
-      return res.status(400).json({ 
-        success: false,
-        message: 'Invalid verification token. Please try registering again.' 
+      return res.status(400).render('verifyError', {
+        errorMessage: 'Invalid token or user not found.'
       });
     }
 
-    // Send success response
-   return res.status(200).json({ 
-      success: true,
-      message: 'Email verified successfully! Your account is now pending admin approval. You will receive an email once approved.'
-    });
+    return res.render('verifySuccess');
 
   } catch (error) {
     console.error('Email verification error:', error);
-    
-    let errorMessage = 'Email verification failed';
+
+    let msg = 'Email verification failed.';
     if (error.name === 'TokenExpiredError') {
-      errorMessage = 'Verification link has expired. Please request a new one.';
+      msg = 'Verification link has expired. Please request a new one.';
     } else if (error.name === 'JsonWebTokenError') {
-      errorMessage = 'Invalid verification token.';
+      msg = 'Invalid verification token.';
     }
 
-    return res.status(400).json({ 
-      success: false,
-      message: errorMessage 
-    });
+    return res.status(400).render('verifyError', { errorMessage: msg });
   }
 });
                               
