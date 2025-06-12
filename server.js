@@ -210,30 +210,33 @@ const VoiceAnswerSchema = new mongoose.Schema({
 const VoiceAnswer = mongoose.model('VoiceAnswer', VoiceAnswerSchema);
 
 // Define MongoDB schema and model
-// Update recordingSchema to include video analysis results
-// Update the recordingSchema
 const recordingSchema = new mongoose.Schema({
   filename: String,
   videoPath: String,
   screenPath: String,
-
-
-  assessmentSession: {  // Add this new field
+  assessmentSession: {
     type: Schema.Types.ObjectId,
     ref: 'AssessmentSession',
     required: true
   },
-   videoAnalysis: {  // Add this new field
-    emotions: Object,
-    analysisResult: Object,
-    processedAt: Date,
+  videoAnalysis: {
+    emotions: {
+      dominant_emotion: String,
+      emotion_distribution: mongoose.Schema.Types.Mixed,
+      occurrence_count: Number,
+      total_frames_processed: Number
+    },
+    video_score: Number,
     status: {
       type: String,
       enum: ['pending', 'processing', 'completed', 'failed'],
       default: 'pending'
-    }
+    },
+    startedAt: Date,
+    completedAt: Date,
+    error: String
   }
-});
+}, { timestamps: true });
 const Recording = mongoose.model("Recording", recordingSchema);
 // Update AssessmentSession schema
 const AssessmentSessionSchema = new Schema({
@@ -711,7 +714,7 @@ async function calculateAndStoreScores(sessionId) {
     // Calculate averages (include 0 for skipped questions)
     const audioAverage = audioScores.reduce((a, b) => a + b, 0) / totalQuestions;
     const textAverage = textScores.reduce((a, b) => a + b, 0) / totalQuestions;
-    const videoScore = recording?.videoAnalysis?.emotions?.video_score || 0;
+    const videoScore = recording?.videoAnalysis?.video_score || 0;
     const mcqScore = testResult.score || 0;
 
     // Final combined score calculation (same weights as before)
@@ -765,30 +768,7 @@ const analyzeAudio = async (s3Keys) => {
   }
 };
 
-const analyzeVideo = async (videoPath) => {
-  try {
-    const form = new FormData();
-    const extension = videoPath.split('.').pop().toLowerCase();
-    const contentType = extension === 'webm' ? 'video/webm' : 'video/mp4'; // Default to mp4 if not webm
-    
-    form.append('video', fs.createReadStream(videoPath), {
-      filename: `interview_video.${extension}`,
-      contentType: contentType
-    });
 
-    const response = await axios.post(process.env.VIDEO_EVALUATION_API_URL, form, {
-      headers: {
-        ...form.getHeaders(),
-        'Content-Length': await new Promise(resolve => form.getLength(resolve))
-      }
-    });
-
-    return response.data;
-  } catch (error) {
-    console.error('Video analysis failed:', error);
-    throw error;
-  }
-};
 
 async function calculateAndStoreAudioScore(sessionId) {
   try {
@@ -1202,25 +1182,64 @@ async function processBackgroundTasks(recording) {
 // Update the interval to use the new function
 setInterval(checkPendingScores, 3600000); // Every hour
 checkPendingScores(); // Run on startup
+
+// Helper function to analyze video files
+async function analyzeVideoFile(file) {
+  try {
+    const form = new FormData();
+    const fileStream = Readable.from(file.buffer);
+    
+    form.append('video', fileStream, {
+      filename: file.originalname,
+      contentType: file.mimetype,
+      knownLength: file.size
+    });
+
+    const response = await axios.post(process.env.VIDEO_EVALUATION_API_URL, form, {
+      headers: {
+        ...form.getHeaders(),
+        'Content-Length': form.getLengthSync()
+      },
+      maxBodyLength: Infinity,
+      timeout: 300000
+    });
+
+    if (!response.data?.emotion_results) {
+      throw new Error('Invalid API response format - missing emotion_results');
+    }
+
+    // Return the parsed data structure
+    return {
+      emotion_results: response.data.emotion_results,
+      video_score: response.data.video_score || 75.0
+    };
+  } catch (error) {
+    console.error('Video analysis failed:', error);
+    throw error;
+  }
+}
 async function calculateAndStoreVideoScore(sessionId) {
   try {
     const recording = await Recording.findOne({ 
       assessmentSession: sessionId,
-      'videoAnalysis.status': 'completed',
-      'videoAnalysis.emotions.video_score': { $exists: true }
+      'videoAnalysis.status': 'completed'
     });
 
-    if (!recording) return null;
+    if (!recording || !recording.videoAnalysis.video_score) {
+      console.error('No completed recording or video score found');
+      return null;
+    }
 
-    const videoScore = recording.videoAnalysis.emotions.video_score;
+    const videoScore = recording.videoAnalysis.video_score;
 
     // Update TestResult with the video score
     await TestResult.findOneAndUpdate(
       { assessmentSession: sessionId },
-      { videoScore },
-      { new: true }
+      { $set: { videoScore } },
+      { upsert: true, new: true }
     );
 
+    console.log(`✅ Saved video score: ${videoScore} for session: ${sessionId}`);
     return videoScore;
   } catch (error) {
     console.error('Error calculating video score:', error);
@@ -2219,55 +2238,99 @@ app.post("/upload", upload.fields([{ name: "cameraFile" }, { name: "screenFile" 
     });
 
     if (!session) {
-      throw new Error('Assessment session not found');
+      return res.status(404).json({ error: 'Assessment session not found' });
     }
 
-    // Generate unique S3 keys
-    const timestamp = Date.now();
-    const cameraKey = `video/session_${session._id}_camera_${timestamp}.webm`;
-    const screenKey = `video/session_${session._id}_screen_${timestamp}.webm`;
-
-    // Create streams from memory buffers
-    const cameraStream = Readable.from(req.files.cameraFile[0].buffer);
-    const screenStream = Readable.from(req.files.screenFile[0].buffer);
-
-    // Upload files to S3 in parallel using streams
-    await Promise.all([
-      uploadToS3(cameraStream, cameraKey, 'video/webm'),
-      uploadToS3(screenStream, screenKey, 'video/webm')
-    ]);
-
-    // Save to MongoDB with S3 references
+    // 1. Create recording with "processing" status
     const recording = new Recording({
       filename: req.files.cameraFile[0].originalname,
-      videoPath: cameraKey,
-      screenPath: screenKey,
       assessmentSession: session._id,
-      videoAnalysis: { status: 'pending' }
+      videoAnalysis: { 
+        status: 'processing',
+        startedAt: new Date() 
+      }
     });
-
     await recording.save();
     session.recording = recording._id;
     await session.save();
 
-    // Start background processing
-    processBackgroundTasks(recording);
+    // 2. Process videos
+    try {
+      // Generate S3 keys first
+      const timestamp = Date.now();
+      const cameraKey = `video/session_${recording._id}_camera_${timestamp}.webm`;
+      const screenKey = `video/session_${recording._id}_screen_${timestamp}.webm`;
 
-    res.status(200).json({ 
-      success: true,
-      message: "Files uploaded successfully",
-      recordingId: recording._id
-    });
+      // Process camera video and upload to S3 in parallel
+      const [videoAnalysis] = await Promise.all([
+        analyzeVideoFile(req.files.cameraFile[0]),
+        uploadToS3(Readable.from(req.files.cameraFile[0].buffer), cameraKey, 'video/webm'),
+        uploadToS3(Readable.from(req.files.screenFile[0].buffer), screenKey, 'video/webm')
+      ]);
+
+      console.log("Video Analysis Results:", videoAnalysis);
+
+      // Update recording with all results
+      const updateData = {
+        videoPath: cameraKey,
+        screenPath: screenKey,
+        'videoAnalysis.emotions': videoAnalysis.emotion_results,
+        'videoAnalysis.video_score': videoAnalysis.video_score,
+        'videoAnalysis.status': 'completed',
+        'videoAnalysis.completedAt': new Date()
+      };
+
+      const updatedRecording = await Recording.findByIdAndUpdate(
+        recording._id,
+        { $set: updateData },
+        { new: true }
+      );
+
+      console.log("✅ Updated Recording:", updatedRecording);
+
+      // Verify the data was saved
+      const dbRecording = await Recording.findById(recording._id);
+      console.log("Database Verification:", {
+        emotions: dbRecording.videoAnalysis.emotions,
+        video_score: dbRecording.videoAnalysis.video_score,
+        status: dbRecording.videoAnalysis.status
+      });
+
+      // Calculate scores
+      await calculateAndStoreVideoScore(session._id);
+      await calculateAndStoreScores(session._id);
+
+      res.status(200).json({ 
+        success: true,
+        recordingId: recording._id,
+        message: "Processing completed successfully",
+        videoScore: videoAnalysis.video_score
+      });
+
+    } catch (processingError) {
+      console.error('Video processing failed:', processingError);
+      await Recording.findByIdAndUpdate(recording._id, {
+        'videoAnalysis.status': 'failed',
+        'videoAnalysis.error': processingError.message,
+        'videoAnalysis.completedAt': new Date()
+      });
+      res.status(500).json({ 
+        success: false,
+        error: "Video processing failed",
+        details: processingError.message
+      });
+    }
 
   } catch (err) {
     console.error("Upload error:", err);
     res.status(500).json({ 
       success: false,
-      error: "File upload failed",
+      error: "File processing failed",
       details: process.env.NODE_ENV === 'development' ? err.message : undefined
     });
   }
 });
+
 // Get all voice answers for a specific assessment session
 app.get('/api/assessment-session/:sessionId/voice-answers', async (req, res) => {
   try {
