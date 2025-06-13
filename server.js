@@ -289,6 +289,20 @@ const TestResult = mongoose.model('TestResult', TestResultSchema);
 // Add near the top with other helper functions
 
 const outputDir = path.join(os.tmpdir(), `whisper_${Date.now()}`);
+
+ // Create NodeMailer transporter using custom SMTP
+ const transporter = nodemailer.createTransport({
+  host: process.env.SMTP_HOST,
+  port: process.env.SMTP_PORT,
+  secure: true, // Use STARTTLS instead of direct TLS
+  tls: {
+    rejectUnauthorized: false // Allow self-signed certificates
+  },
+  auth: {
+    user: process.env.SMTP_USER,
+    pass: process.env.SMTP_PASS,
+  },
+});
 // JWT Secret
 const JWT_SECRET = process.env.JWT_SECRET;
 
@@ -393,7 +407,53 @@ app.get('/api/candidate-filtering', async (req, res) => {
   }
 });
 
+// Add this new endpoint while keeping all existing endpoints
+app.get('/api/candidates/segmented', async (req, res) => {
+  try {
+    const cutoffTime = new Date(Date.now() - 24 * 60 * 60 * 1000); // 24 hours ago
+    
+    // First get all needed data (same as original endpoint)
+    const [responses, testScores, sessions] = await Promise.all([
+      ApiResponse.find()
+        .populate('resumeId', 'title filename')
+        .populate('jobDescriptionId', 'title filename')
+        .sort({ createdAt: -1 }),
+      TestResult.find(),
+      AssessmentSession.find()
+        .populate('recording')
+        .populate('testResult')
+    ]);
 
+    // Enrich all candidates (same as original)
+    const allCandidates = responses.map(candidate => {
+      const email = candidate.matchingResult?.[0]?.["Resume Data"]?.email;
+      const testScore = testScores.find(ts => ts.candidateEmail === email);
+      const session = sessions.find(s => s.candidateEmail === email);
+
+      return {
+        ...candidate.toObject(),
+        testScore: testScore || null,
+        assessmentSession: session || null
+      };
+    });
+
+    // Now split into recent/history
+    const recent = allCandidates.filter(c => 
+      new Date(c.createdAt) >= cutoffTime
+    );
+    const history = allCandidates.filter(c => 
+      new Date(c.createdAt) < cutoffTime
+    );
+
+    res.status(200).json({
+      recent,
+      history
+    });
+  } catch (error) {
+    console.error('Error fetching segmented candidates:', error.message);
+    res.status(500).json({ error: 'Failed to fetch segmented candidates.' });
+  }
+});
 
 // WebSocket connection handler
 io.on('connection', (socket) => {
@@ -1620,14 +1680,7 @@ app.post('/api/send-test-link', authenticateJWT, checkSubscription, checkUsageLi
     });
 
 
-    // Create NodeMailer transporter
-    const transporter = nodemailer.createTransport({
-      service: 'gmail',
-      auth: {
-        user: process.env.EMAIL_USER,
-        pass: process.env.EMAIL_PASSWORD
-      }
-    });
+  
 
     // Email options
     const mailOptions = {
@@ -2473,14 +2526,7 @@ app.post('/login', async (req, res) => {
     res.status(500).json({ message: 'Server error.' });
   }
 });
- // Create NodeMailer transporter
-      const transporter = nodemailer.createTransport({
-        service: 'gmail',
-        auth: {
-          user: process.env.EMAIL_USER,
-          pass: process.env.EMAIL_PASSWORD
-        }
-      });
+
 // Register a new user with admin approval flow
 // Updated Register Endpoint with proper error handling and responses
 app.post( '/register',[
@@ -2577,6 +2623,7 @@ app.post( '/register',[
             </div>
           `
         });
+        console.log(`Verification email sent to ${email}`);
       } catch (emailError) {
         console.error('Failed to send verification email:', emailError);
         // Don't fail the registration if email fails
