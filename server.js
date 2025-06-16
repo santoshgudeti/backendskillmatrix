@@ -410,7 +410,8 @@ app.get('/api/candidate-filtering', async (req, res) => {
 // Add this new endpoint while keeping all existing endpoints
 app.get('/api/candidates/segmented', async (req, res) => {
   try {
-    const cutoffTime = new Date(Date.now() - 24 * 60 * 60 * 1000); // 24 hours ago
+  const cutoffTime = new Date(Date.now() - 24 * 60 * 60 * 1000); // 24 hours ago'
+
     
     // First get all needed data (same as original endpoint)
     const [responses, testScores, sessions] = await Promise.all([
