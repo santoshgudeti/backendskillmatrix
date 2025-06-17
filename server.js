@@ -129,17 +129,20 @@ const User = mongoose.model('User', userSchema);
 
 const ResumeSchema = new Schema({
   title: String,
-  s3Key: String, // This will store the S3 object key
-  filename: String,
+  s3Key: { type: String, required: true }, // Make this required
+  filename: { type: String, required: true },
   uploadedAt: { type: Date, default: Date.now },
+  user: { type: Schema.Types.ObjectId, ref: 'User', required: true },
+  hash: { type: String, unique: true } // Add hash for deduplication
 });
 
 const JobDescriptionSchema = new Schema({
   title: String,
-  s3Key: String, // This will store the S3 object key
-  filename: String,
+  s3Key: { type: String, required: true }, // Make this required
+  filename: { type: String, required: true },
   uploadedAt: { type: Date, default: Date.now },
   hash: { type: String, unique: true },
+    user: { type: Schema.Types.ObjectId, ref: 'User', required: true } // Added
 });
 
 
@@ -149,6 +152,8 @@ const ApiResponseSchema = new Schema({
   matchingResult: Object,
   createdAt: { type: Date, default: Date.now },
   hash: { type: String, unique: true }, // Hash to avoid duplicate processing
+    user: { type: Schema.Types.ObjectId, ref: 'User', required: true } // Added
+
 });
 const Resume = mongoose.model('Resume', ResumeSchema);
 const JobDescription = mongoose.model('JobDescription', JobDescriptionSchema);
@@ -267,7 +272,9 @@ const AssessmentSessionSchema = new Schema({
   },
   startedAt: { type: Date, default: Date.now },
   completedAt: { type: Date },
-  status: { type: String, enum: ['pending', 'in-progress', 'completed'], default: 'pending' }
+  status: { type: String, enum: ['pending', 'in-progress', 'completed'], default: 'pending' },
+   user: { type: Schema.Types.ObjectId, ref: 'User', required: true } // Added
+  
 });
 
 console.log("✅ MongoDB Schema and Model Initialized");
@@ -283,7 +290,9 @@ const TestResultSchema = new Schema({
   combinedScore: { type: Number }, // Combined overall score
   assessmentSession: { type: Schema.Types.ObjectId, ref: 'AssessmentSession', required: true },
   submittedAt: { type: Date, default: Date.now },
-  status: { type: String, enum: ['pending', 'completed', 'expired'], default: 'pending' }
+  status: { type: String, enum: ['pending', 'completed', 'expired'], default: 'pending' },
+    user: { type: Schema.Types.ObjectId, ref: 'User', required: true } // Added
+
 }, { timestamps: true });
 const TestResult = mongoose.model('TestResult', TestResultSchema);
 // Add near the top with other helper functions
@@ -324,31 +333,106 @@ const isAdmin = (req, res, next) => {
   next();
 };
 
+const verifyOwnership = (model) => async (req, res, next) => {
+  try {
+ const id = req.params.resumeId || req.params.jobDescriptionId || req.params.id;
 
+    console.log(`Verifying ownership for ${model.modelName} ${id}`);
 
-app.get('/api/resumes/:resumeId', async (req, res) => {
+    const doc = await model.findById(id);
+
+    if (!doc) {
+      console.log('❌ Document not found in DB for ID:', id);
+      return res.status(404).json({ error: 'Document not found' });
+    }
+
+    // Admins skip ownership
+    if (req.user.isAdmin) {
+      console.log('✅ Admin access granted');
+      return next();
+    }
+
+    // Ownership check
+    if (!doc.user || doc.user.toString() !== req.user.id) {
+      console.log('❌ Ownership mismatch', {
+        documentOwner: doc.user,
+        requestingUser: req.user.id
+      });
+      return res.status(403).json({ 
+        error: 'Access denied',
+        details: {
+          documentOwner: doc.user,
+          requestingUser: req.user.id
+        }
+      });
+    }
+
+    console.log('✅ Ownership verified successfully');
+    next();
+  } catch (error) {
+    console.error('Ownership verification error:', error);
+    res.status(500).json({ 
+      error: 'Server error',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+};
+
+app.get('/api/resumes/:resumeId', authenticateJWT, verifyOwnership(Resume), async (req, res) => {
   try {
     const { resumeId } = req.params;
+    
+    // More thorough validation
+    if (!mongoose.Types.ObjectId.isValid(resumeId)) {
+      return res.status(400).json({ error: 'Invalid resume ID format' });
+    }
+
     const resume = await Resume.findById(resumeId);
-    if (!resume) return res.status(404).json({ error: 'Resume not found.' });
+    if (!resume) {
+      return res.status(404).json({ error: 'Resume not found' });
+    }
+
+    if (!resume.s3Key) {
+      return res.status(404).json({ error: 'Resume file not found in storage' });
+    }
 
     const command = new GetObjectCommand({
       Bucket: process.env.S3_BUCKET_NAME,
       Key: resume.s3Key,
       ResponseContentDisposition: req.query.download 
-      ? `attachment; filename="${resume.filename}"` 
-      : undefined
+        ? `attachment; filename="${encodeURIComponent(resume.filename)}"` 
+        : 'inline'
     });
     
-    const url = await getSignedUrl(s3, command); // 5 minutes
-    res.status(200).json({ url });
+    const url = await getSignedUrl(s3, command); // 1 hour expiration
+    
+    res.json({ 
+      success: true,
+      url,
+      filename: resume.filename,
+     
+    });
+
   } catch (error) {
-    console.error('Error retrieving resume:', error.message);
-    res.status(500).json({ error: 'Failed to retrieve resume.' });
+    console.error('Error retrieving resume:', error);
+    
+    let errorMessage = 'Failed to retrieve resume';
+    if (error.name === 'NoSuchKey') {
+      errorMessage = 'Resume file not found in storage';
+    } else if (error.name === 'AccessDenied') {
+      errorMessage = 'Access to resume denied';
+    }
+    
+    res.status(500).json({ 
+      success: false,
+      error: errorMessage,
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
   }
 });
 // Add this endpoint right after your JobDescription endpoint
-app.get('/api/job-descriptions/:jobDescriptionId', async (req, res) => {
+app.get('/api/job-descriptions/:jobDescriptionId', authenticateJWT, verifyOwnership(JobDescription), async (req, res) => {
+
   try {
     const { jobDescriptionId } = req.params;
     const jobDescription = await JobDescription.findById(jobDescriptionId);
@@ -372,10 +456,10 @@ app.get('/api/job-descriptions/:jobDescriptionId', async (req, res) => {
   }
 });
 
-app.get('/api/candidate-filtering', async (req, res) => {
+app.get('/api/candidate-filtering', authenticateJWT, async (req, res) => {
   try {
     // Step 1: Fetch base candidate responses
-    const responses = await ApiResponse.find()
+     const responses = await ApiResponse.find({ user: req.user.id })
       .populate('resumeId', 'title filename')
       .populate('jobDescriptionId', 'title filename')
       .sort({ createdAt: -1 });
@@ -408,19 +492,19 @@ app.get('/api/candidate-filtering', async (req, res) => {
 });
 
 // Add this new endpoint while keeping all existing endpoints
-app.get('/api/candidates/segmented', async (req, res) => {
+app.get('/api/candidates/segmented', authenticateJWT, async (req, res) => {
   try {
-  const cutoffTime = new Date(Date.now() - 24 * 60 * 60 * 1000); // 24 hours ago'
+  const cutoffTime = new Date(Date.now() - 1 * 60 * 1000); // 24 hours ago'
 
     
     // First get all needed data (same as original endpoint)
     const [responses, testScores, sessions] = await Promise.all([
-      ApiResponse.find()
+       ApiResponse.find({ user: req.user.id })
         .populate('resumeId', 'title filename')
         .populate('jobDescriptionId', 'title filename')
         .sort({ createdAt: -1 }),
-      TestResult.find(),
-      AssessmentSession.find()
+      TestResult.find({ user: req.user.id }),
+      AssessmentSession.find({ user: req.user.id })
         .populate('recording')
         .populate('testResult')
     ]);
@@ -623,6 +707,7 @@ app.post('/api/submit',authenticateJWT,checkSubscription,checkUsageLimits('jdUpl
           s3Key: jdS3Params.Key, // Store the S3 key
           filename: jobDescription.originalname,
           hash: jdHash,
+          user: req.user.id
         });
         await jobDescDoc.save();
       }
@@ -647,6 +732,7 @@ app.post('/api/submit',authenticateJWT,checkSubscription,checkUsageLimits('jdUpl
             s3Key: resumeS3Params.Key, // Store the S3 key
             filename: resume.originalname,
             hash: resumeHash,
+              user: req.user.id
           });
           await resumeDoc.save();
         }
@@ -675,6 +761,7 @@ app.post('/api/submit',authenticateJWT,checkSubscription,checkUsageLimits('jdUpl
               jobDescriptionId: jobDescDoc._id,
               matchingResult: apiResponse.data['POST Response'],
               hash: `${resumeHash}-${jdHash}`,
+                  user: req.user.id
             });
             await savedResponse.save();
             emitApiResponseUpdate(savedResponse);
@@ -1664,6 +1751,7 @@ app.post('/api/send-test-link', authenticateJWT, checkSubscription, checkUsageLi
 
     // Create session
     const session = new AssessmentSession({
+      user: req.user.id,
       candidateEmail,
       jobTitle,
       testLink,
@@ -2026,9 +2114,15 @@ app.get('/api/recording/:id/play', async (req, res) => {
 // Similar endpoint for screen recording and audio answers
 // Fetch Test Results
 // Updated test-results endpoint
-app.get('/api/test-results', async (req, res) => {
+app.get('/api/test-results',authenticateJWT, async (req, res) => {
   try {
-    const testScores = await TestResult.find()
+   
+ const query = { user: req.user.id };
+    if (req.user.isAdmin) {
+      delete query.user; // Admins see all results
+    }
+    
+    const testScores = await TestResult.find(query)
       .populate('assessmentSession')
       .sort({ createdAt: -1 });
     res.status(200).json(testScores);
@@ -2388,10 +2482,21 @@ app.post("/upload", upload.fields([{ name: "cameraFile" }, { name: "screenFile" 
 });
 
 // Get all voice answers for a specific assessment session
-app.get('/api/assessment-session/:sessionId/voice-answers', async (req, res) => {
+app.get('/api/assessment-session/:sessionId/voice-answers',authenticateJWT, async (req, res) => {
   try {
+
+      const session = await AssessmentSession.findOne({
+      _id: req.params.sessionId,
+      user: req.user.id
+    });
+    
+    if (!session) {
+      return res.status(404).json({ error: 'Session not found' });
+    }
+    
     const answers = await VoiceAnswer.find({
       assessmentSession: req.params.sessionId
+      
     }).sort({ createdAt: 1 }); // Sort by creation time
 
     res.json(answers);
@@ -2402,11 +2507,12 @@ app.get('/api/assessment-session/:sessionId/voice-answers', async (req, res) => 
 
 // Get Combined score of all the test scores
 
-app.get('/api/assessment-session/:sessionId/full-results', async (req, res) => {
-  try {
-    const session = await AssessmentSession.findById(req.params.sessionId)
-      .populate('testResult')
-      .populate('voiceAnswers');
+app.get('/api/assessment-session/:sessionId/full-results',authenticateJWT, async (req, res) => {
+ try {
+    const session = await AssessmentSession.findOne({
+      _id: req.params.sessionId,
+      user: req.user.id
+    }).populate('testResult').populate('voiceAnswers');
 
     if (!session) {
       return res.status(404).json({ error: 'Session not found' });
@@ -2414,7 +2520,7 @@ app.get('/api/assessment-session/:sessionId/full-results', async (req, res) => {
 
     // Calculate average if not already set
     if (!session.testResult.audioScore) {
-      await calculateAndStoreAudioScore(session._id);
+      await calculateAndStoreAudioScore(session._id);c
       await session.populate('testResult');
     }
 
@@ -2677,6 +2783,112 @@ app.post( '/register',[
         success: false,
         message: 'An error occurred during registration. Please try again later.'
       });
+    }
+  }
+);
+
+// Password Reset Token Model (add near other schemas)
+const PasswordResetTokenSchema = new mongoose.Schema({
+  email: { type: String, required: true },
+  token: { type: String, required: true, unique: true },
+  expiresAt: { type: Date, default: () => new Date(Date.now() + 15 * 60 * 1000) } // 15 mins expiry
+}, { timestamps: true });
+
+PasswordResetTokenSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 }); // Auto-delete expired tokens
+const PasswordResetToken = mongoose.model('PasswordResetToken', PasswordResetTokenSchema);
+
+// Generate secure token (add to helper functions)
+const generateResetToken = () => crypto.randomBytes(32).toString('hex');
+
+// 1. Request Password Reset
+app.post('/api/forgot-password', 
+  body('email').isEmail().normalizeEmail(),
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ error: 'Invalid email' });
+    }
+
+    const { email } = req.body;
+
+    try {
+      const user = await User.findOne({ email });
+      if (!user) {
+        return res.status(404).json({ error: 'Email not found' });
+      }
+
+      // Delete any existing tokens
+      await PasswordResetToken.deleteMany({ email });
+
+      // Generate and save new token
+      const token = generateResetToken();
+      await PasswordResetToken.create({ email, token });
+
+      // Send email
+      const resetLink = `${process.env.FRONTEND_URL}/reset-password?token=${token}&email=${encodeURIComponent(email)}`;
+      
+      await transporter.sendMail({
+        from: `"ATS Support" <${process.env.EMAIL_USER}>`,
+        to: email,
+        subject: 'Password Reset Request',
+        html: `
+          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+            <h2 style="color: #2563eb;">Password Reset</h2>
+            <p>You requested a password reset. Click below to proceed:</p>
+            <a href="${resetLink}" 
+               style="background-color: #2563eb; color: white; padding: 10px 20px; 
+                      text-decoration: none; border-radius: 5px; display: inline-block;">
+              Reset Password
+            </a>
+            <p style="color: #6b7280; font-size: 12px; margin-top: 20px;">
+              This link expires in 15 minutes. If you didn't request this, please ignore this email.
+            </p>
+          </div>
+        `
+      });
+
+      res.json({ success: true });
+    } catch (error) {
+      console.error('Password reset error:', error);
+      res.status(500).json({ error: 'Failed to process request' });
+    }
+  }
+);
+
+// 2. Verify Token & Reset Password
+app.post('/api/reset-password',
+  [
+    body('token').notEmpty(),
+    body('email').isEmail().normalizeEmail(),
+    body('password').isLength({ min: 6 }),
+    body('confirmPassword').custom((value, { req }) => value === req.body.password)
+  ],
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
+
+    const { token, email, password } = req.body;
+
+    try {
+      // Verify token
+      const resetToken = await PasswordResetToken.findOne({ token, email });
+      if (!resetToken || resetToken.expiresAt < new Date()) {
+        return res.status(400).json({ error: 'Invalid or expired token' });
+      }
+
+      // Update password
+      const hashedPassword = await bcrypt.hash(password, 10);
+      await User.updateOne({ email }, { password: hashedPassword });
+
+      // Cleanup
+      await PasswordResetToken.deleteOne({ _id: resetToken._id });
+
+      res.json({ success: true });
+    } catch (error) {
+      console.error('Password reset error:', error);
+      res.status(500).json({ error: 'Failed to reset password' });
     }
   }
 );
