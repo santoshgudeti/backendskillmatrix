@@ -456,6 +456,78 @@ app.get('/api/job-descriptions/:jobDescriptionId', authenticateJWT, verifyOwners
   }
 });
 
+// Add these endpoints after your existing JD routes
+
+// Get all JDs for current user
+app.get('/api/job-descriptions', authenticateJWT, async (req, res) => {
+  try {
+    const jds = await JobDescription.find({ user: req.user.id })
+      .sort({ uploadedAt: -1 })
+      .select('title filename uploadedAt');
+    
+    res.status(200).json(jds);
+  } catch (error) {
+    console.error('Error fetching job descriptions:', error);
+    res.status(500).json({ error: 'Failed to fetch job descriptions' });
+  }
+});
+
+// Get JD content by ID
+app.get('/api/job-descriptions/:id/content', authenticateJWT, verifyOwnership(JobDescription), async (req, res) => {
+  try {
+    const jd = await JobDescription.findById(req.params.id);
+    if (!jd) {
+      return res.status(404).json({ error: 'Job description not found' });
+    }
+
+    const command = new GetObjectCommand({
+      Bucket: process.env.S3_BUCKET_NAME,
+      Key: jd.s3Key
+    });
+
+    const url = await getSignedUrl(s3, command);
+    const response = await axios.get(url, { responseType: 'arraybuffer' });
+    
+    res.status(200).send(response.data);
+  } catch (error) {
+    console.error('Error fetching JD content:', error);
+    res.status(500).json({ error: 'Failed to fetch JD content' });
+  }
+});
+
+// Update JD title
+app.put('/api/job-descriptions/:id/title', authenticateJWT, verifyOwnership(JobDescription), async (req, res) => {
+  try {
+    const { title } = req.body;
+    if (!title || typeof title !== 'string') {
+      return res.status(400).json({ error: 'Valid title is required' });
+    }
+
+    const updatedJd = await JobDescription.findByIdAndUpdate(
+      req.params.id,
+      { title },
+      { new: true }
+    );
+
+    res.status(200).json(updatedJd);
+  } catch (error) {
+    console.error('Error updating JD title:', error);
+    res.status(500).json({ error: 'Failed to update JD title' });
+  }
+});
+
+// Delete JD
+app.delete('/api/job-descriptions/:id', authenticateJWT, verifyOwnership(JobDescription), async (req, res) => {
+  try {
+    await JobDescription.findByIdAndDelete(req.params.id);
+    // Note: You may want to also delete from S3 in production
+    res.status(200).json({ success: true });
+  } catch (error) {
+    console.error('Error deleting JD:', error);
+    res.status(500).json({ error: 'Failed to delete JD' });
+  }
+});
+
 app.get('/api/candidate-filtering', authenticateJWT, async (req, res) => {
   try {
     // Step 1: Fetch base candidate responses
