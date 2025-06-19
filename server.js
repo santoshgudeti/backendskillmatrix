@@ -29,6 +29,12 @@ const { Upload } = require("@aws-sdk/lib-storage");
 const { Readable } = require('stream');
 const { Blob } = require('buffer');
 
+// Add new dependencies at the top
+const PDFDocument = require('pdfkit');
+const Chart = require('chart.js');
+const { createCanvas } = require('canvas');
+const htmlToPdf = require('html-pdf');
+
 
 dotenv.config();
 // Initialize Express app
@@ -295,6 +301,21 @@ const TestResultSchema = new Schema({
 
 }, { timestamps: true });
 const TestResult = mongoose.model('TestResult', TestResultSchema);
+
+// Add near other schemas
+const ReportSchema = new mongoose.Schema({
+  assessmentSession: { 
+    type: Schema.Types.ObjectId, 
+    ref: 'AssessmentSession',
+    required: true 
+  },
+  s3Key: { type: String, required: true },
+  filename: { type: String, required: true },
+  generatedAt: { type: Date, default: Date.now },
+  user: { type: Schema.Types.ObjectId, ref: 'User', required: true }
+}, { timestamps: true });
+
+const Report = mongoose.model('Report', ReportSchema);
 // Add near the top with other helper functions
 
 const outputDir = path.join(os.tmpdir(), `whisper_${Date.now()}`);
@@ -377,7 +398,141 @@ const verifyOwnership = (model) => async (req, res, next) => {
     });
   }
 };
+/* report generation */
 
+// Add these with your other utility functions
+async function generateScoreChart(scores) {
+  const { createCanvas } = require('canvas');
+  const canvas = createCanvas(400, 200);
+  const ctx = canvas.getContext('2d');
+  
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  
+  ctx.fillStyle = '#007bff';
+  ctx.fillRect(50, 200 - scores.mcq * 2, 60, scores.mcq * 2);
+  ctx.fillRect(150, 200 - scores.audio * 2, 60, scores.audio * 2);
+  ctx.fillRect(250, 200 - scores.video * 2, 60, scores.video * 2);
+  ctx.fillRect(350, 200 - scores.combined * 2, 60, scores.combined * 2);
+  
+  ctx.fillStyle = '#000000';
+  ctx.font = '12px Arial';
+  ctx.fillText('MCQ', 60, 190);
+  ctx.fillText('Audio', 160, 190);
+  ctx.fillText('Video', 260, 190);
+  ctx.fillText('Overall', 360, 190);
+  
+  return canvas.toBuffer();
+}
+
+async function generateAssessmentReport(sessionId, userId) {
+  try {
+    const PDFDocument = require('pdfkit');
+    const [session, testResult, voiceAnswers, recording] = await Promise.all([
+      AssessmentSession.findById(sessionId)
+        .populate('resumeId')
+        .populate('jobDescriptionId'),
+      TestResult.findOne({ assessmentSession: sessionId }),
+      VoiceAnswer.find({ assessmentSession: sessionId }),
+      Recording.findOne({ assessmentSession: sessionId })
+    ]);
+
+    if (!session || !testResult) {
+      throw new Error('Assessment data not found');
+    }
+
+    const doc = new PDFDocument();
+    const buffers = [];
+    doc.on('data', buffers.push.bind(buffers));
+    
+    // Report content (same as before)
+    doc.fontSize(20).text('Candidate Assessment Report', { align: 'center' });
+    doc.moveDown();
+    doc.fontSize(14).text(`Candidate: ${session.candidateEmail}`);
+    doc.text(`Job Title: ${session.jobTitle}`);
+    doc.text(`Assessment Date: ${session.completedAt.toLocaleDateString()}`);
+    doc.moveDown();
+    doc.fontSize(16).text('Performance Summary', { underline: true });
+    doc.text(`MCQ Score: ${testResult.score}/100`);
+    doc.text(`Audio Score: ${testResult.audioScore}/100`);
+    doc.text(`Video Score: ${testResult.videoScore}/100`);
+    doc.text(`Combined Score: ${testResult.combinedScore}/100`);
+    doc.moveDown();
+    
+    const chartBuffer = await generateScoreChart({
+      mcq: testResult.score,
+      audio: testResult.audioScore,
+      video: testResult.videoScore,
+      combined: testResult.combinedScore
+    });
+    
+    doc.image(chartBuffer, 50, doc.y, { width: 400 });
+    doc.moveDown(5);
+    
+    // MCQ Questions & Answers
+    doc.fontSize(16).text('MCQ Assessment', { underline: true });
+    session.questions.forEach((q, i) => {
+      doc.fontSize(12).text(`Q${i+1}: ${q.question}`);
+      doc.fontSize(10).text(`Candidate Answer: [Not stored - would need to add to schema]`);
+      doc.text(`Correct Answer: ${q.correctAnswer}`);
+      doc.moveDown();
+    });
+    
+    // Voice Questions & Answers
+    doc.addPage();
+    doc.fontSize(16).text('Voice Assessment', { underline: true });
+    voiceAnswers.forEach((answer, i) => {
+      doc.fontSize(12).text(`Q${i+1}: ${answer.question}`);
+      doc.fontSize(10).text(`Transcript: ${answer.answer || 'No answer provided'}`);
+      if (answer.audioAnalysis?.grading) {
+        doc.text(`Audio Score: ${answer.audioAnalysis.grading['Total Score']}/100`);
+      }
+      doc.moveDown();
+    });
+    
+    // Video Analysis
+    if (recording?.videoAnalysis) {
+      doc.addPage();
+      doc.fontSize(16).text('Video Analysis', { underline: true });
+      doc.text(`Dominant Emotion: ${recording.videoAnalysis.emotions.dominant_emotion}`);
+      doc.text(`Video Score: ${recording.videoAnalysis.video_score}/100`);
+    }
+    
+    return new Promise((resolve, reject) => {
+      doc.on('end', async () => {
+        try {
+          const pdfBuffer = Buffer.concat(buffers);
+          const filename = `report_${sessionId}_${Date.now()}.pdf`;
+          const s3Key = `reports/${filename}`;
+          
+          await uploadToS3(pdfBuffer, s3Key, 'application/pdf');
+          
+          const report = new Report({
+            assessmentSession: sessionId,
+            s3Key,
+            filename,
+            user: userId
+          });
+          await report.save();
+          
+          resolve({
+            s3Key,
+            filename,
+            reportId: report._id
+          });
+        } catch (err) {
+          reject(err);
+        }
+      });
+      
+      doc.end();
+    });
+  } catch (error) {
+    console.error('Report generation failed:', error);
+    throw error;
+  }
+}
+/*end points */
 app.get('/api/resumes/:resumeId', authenticateJWT, verifyOwnership(Resume), async (req, res) => {
   try {
     const { resumeId } = req.params;
@@ -2060,6 +2215,14 @@ if (recordingId) {
       }
     });
 
+     setTimeout(async () => {
+      try {
+        await generateAssessmentReport(session._id, session.user);
+      } catch (reportError) {
+        console.error('Background report generation failed:', reportError);
+      }
+    }, 0);
+
   } catch (error) {
     console.error('Assessment completion error:', error);
     
@@ -2072,6 +2235,46 @@ if (recordingId) {
     res.status(500).json({
       error: 'Failed to complete assessment',
       code: 'SERVER_ERROR',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
+// Add near other endpoints
+app.post('/api/generate-report/:sessionId', authenticateJWT, verifyOwnership(AssessmentSession), async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    
+    // Generate and store report
+    const report = await generateAssessmentReport(sessionId, req.user.id);
+    
+    // Get signed URL for download
+    const command = new GetObjectCommand({
+      Bucket: process.env.S3_BUCKET_NAME,
+      Key: report.s3Key
+    });
+    const downloadUrl = await getSignedUrl(s3, command, { expiresIn: 3600 });
+    
+    // Send email notification
+    const session = await AssessmentSession.findById(sessionId);
+    await sendReportEmail(
+      req.user.email,
+      downloadUrl,
+      session.candidateEmail,
+      session.jobTitle
+    );
+    
+    res.json({
+      success: true,
+      message: 'Report generated and sent successfully',
+      downloadUrl,
+      reportId: report.reportId
+    });
+  } catch (error) {
+    console.error('Report generation error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to generate report',
       details: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
