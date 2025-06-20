@@ -259,12 +259,14 @@ const AssessmentSessionSchema = new Schema({
   recording: { type: Schema.Types.ObjectId, ref: 'Recording' },
   testResult: { type: Schema.Types.ObjectId, ref: 'TestResult' },
   voiceAnswers: [{ type: Schema.Types.ObjectId, ref: 'VoiceAnswer' }],
-  questions: [{
-    id: String,
-    question: String,
-    options: [String],
-    correctAnswer: String
-  }],
+// Update AssessmentSession schema to store user answers
+questions: [{
+  id: String,
+  question: String,
+  options: [String],
+  correctAnswer: String,
+  userAnswer: String // Add this field to store user's answer
+}],
   voiceQuestions: [{
     id: String,
     question: String
@@ -424,80 +426,135 @@ async function generateScoreChart(scores) {
   
   return canvas.toBuffer();
 }
-
 async function generateAssessmentReport(sessionId, userId) {
   try {
-    const PDFDocument = require('pdfkit');
+    // Wait for all scores to be processed
+    await waitForScores(sessionId);
+
     const [session, testResult, voiceAnswers, recording] = await Promise.all([
       AssessmentSession.findById(sessionId)
         .populate('resumeId')
-        .populate('jobDescriptionId'),
+        .populate('jobDescriptionId')
+        .populate('user'),
       TestResult.findOne({ assessmentSession: sessionId }),
       VoiceAnswer.find({ assessmentSession: sessionId }),
       Recording.findOne({ assessmentSession: sessionId })
     ]);
 
-    if (!session || !testResult) {
+if (!session || !testResult) {
       throw new Error('Assessment data not found');
     }
 
-    const doc = new PDFDocument();
+    // Verify all processing is complete
+    const incompleteAudio = voiceAnswers.some(a => 
+      a.audioAnalysis?.status !== 'completed' && 
+      a.audioAnalysis?.status !== 'failed' &&
+      a.audioAnalysis?.status !== 'skipped'
+    );
+
+    const incompleteText = voiceAnswers.some(a => 
+      a.textEvaluation?.status !== 'completed' && 
+      a.textEvaluation?.status !== 'failed' &&
+      a.textEvaluation?.status !== 'skipped'
+    );
+
+    if (incompleteAudio || incompleteText || 
+        (recording && recording.videoAnalysis?.status !== 'completed')) {
+      throw new Error('Some evaluations are still processing');
+    }
+
+    const doc = new PDFDocument({ margin: 50 });
     const buffers = [];
     doc.on('data', buffers.push.bind(buffers));
-    
-    // Report content (same as before)
-    doc.fontSize(20).text('Candidate Assessment Report', { align: 'center' });
-    doc.moveDown();
-    doc.fontSize(14).text(`Candidate: ${session.candidateEmail}`);
-    doc.text(`Job Title: ${session.jobTitle}`);
-    doc.text(`Assessment Date: ${session.completedAt.toLocaleDateString()}`);
-    doc.moveDown();
-    doc.fontSize(16).text('Performance Summary', { underline: true });
-    doc.text(`MCQ Score: ${testResult.score}/100`);
-    doc.text(`Audio Score: ${testResult.audioScore}/100`);
-    doc.text(`Video Score: ${testResult.videoScore}/100`);
-    doc.text(`Combined Score: ${testResult.combinedScore}/100`);
-    doc.moveDown();
-    
-    const chartBuffer = await generateScoreChart({
+
+
+
+    // Candidate Information
+    doc.fontSize(14).text('Candidate Information', { underline: true });
+    doc.fontSize(12)
+       .text(`Name: ${session.candidateEmail}`)
+       .text(`Position: ${session.jobTitle}`)
+       .text(`Assessment Date: ${session.completedAt.toLocaleDateString()}`)
+       .moveDown();
+
+    // Scores Summary with Charts
+    doc.addPage()
+       .fontSize(14).text('Performance Summary', { underline: true });
+
+    // Create score chart
+    const chartBuffer = await createScoreChart({
       mcq: testResult.score,
       audio: testResult.audioScore,
       video: testResult.videoScore,
       combined: testResult.combinedScore
     });
+    doc.image(chartBuffer, 50, 100, { width: 500 });
+
+    // Detailed Scores
+    doc.fontSize(12)
+       .text(`MCQ Score: ${testResult.score}/100`, { continued: true })
+       .text(` | Audio Score: ${testResult.audioScore}/100`, { continued: true })
+       .text(` | Video Score: ${testResult.videoScore}/100`)
+       .text(`Combined Score: ${testResult.combinedScore}/100`)
+       .moveDown();
+
+    // MCQ Section
+    doc.addPage()
+       .fontSize(14).text('MCQ Assessment', { underline: true });
     
-    doc.image(chartBuffer, 50, doc.y, { width: 400 });
-    doc.moveDown(5);
-    
-    // MCQ Questions & Answers
-    doc.fontSize(16).text('MCQ Assessment', { underline: true });
     session.questions.forEach((q, i) => {
       doc.fontSize(12).text(`Q${i+1}: ${q.question}`);
-      doc.fontSize(10).text(`Candidate Answer: [Not stored - would need to add to schema]`);
-      doc.text(`Correct Answer: ${q.correctAnswer}`);
-      doc.moveDown();
+      doc.fontSize(10)
+         .text(`Candidate Answer: ${q.userAnswer || 'Not answered'}`)
+         .text(`Correct Answer: ${q.correctAnswer}`)
+         .moveDown();
     });
+
+    // Voice Assessment Section
+    doc.addPage()
+       .fontSize(14).text('Voice Assessment', { underline: true });
     
-    // Voice Questions & Answers
-    doc.addPage();
-    doc.fontSize(16).text('Voice Assessment', { underline: true });
-    voiceAnswers.forEach((answer, i) => {
-      doc.fontSize(12).text(`Q${i+1}: ${answer.question}`);
-      doc.fontSize(10).text(`Transcript: ${answer.answer || 'No answer provided'}`);
-      if (answer.audioAnalysis?.grading) {
-        doc.text(`Audio Score: ${answer.audioAnalysis.grading['Total Score']}/100`);
+ // Updated generateAssessmentReport function
+voiceAnswers.forEach((answer, i) => {
+  doc.fontSize(12).text(`Q${i+1}: ${answer.question}`);
+  doc.fontSize(10)
+     .text(`Transcript: ${answer.answer || 'No answer provided'}`);
+  
+  // Enhanced score display with proper null checks
+  const audioScore = answer.audioAnalysis?.grading?.['Total Score'] ?? 'N/A';
+  const textScore = answer.textEvaluation?.metrics?.total_average ?? 'N/A';
+  
+  doc.text(`Audio Score: ${audioScore}/100`);
+  doc.text(`Text Evaluation Score: ${textScore}/100`);
+  
+  // Add detailed text metrics if available
+  if (answer.textEvaluation?.metrics) {
+    doc.moveDown(0.5);
+    doc.fontSize(10).text('Detailed Text Analysis:', { underline: true });
+    Object.entries(answer.textEvaluation.metrics).forEach(([key, value]) => {
+      if (key !== 'total_average' && key !== 'total_overall_score') {
+        doc.text(`${key}: ${value.toFixed(2)}`);
       }
-      doc.moveDown();
     });
-    
-    // Video Analysis
+  }
+  
+  doc.moveDown();
+});
+
+    // Video Analysis Section
     if (recording?.videoAnalysis) {
-      doc.addPage();
-      doc.fontSize(16).text('Video Analysis', { underline: true });
+      doc.addPage()
+         .fontSize(14).text('Video Analysis', { underline: true });
+      
       doc.text(`Dominant Emotion: ${recording.videoAnalysis.emotions.dominant_emotion}`);
       doc.text(`Video Score: ${recording.videoAnalysis.video_score}/100`);
+      
+      // Add emotion distribution chart
+      const emotionChart = await createEmotionChart(recording.videoAnalysis.emotions);
+      doc.image(emotionChart, 50, doc.y, { width: 400 });
     }
-    
+
+    // Finalize PDF
     return new Promise((resolve, reject) => {
       doc.on('end', async () => {
         try {
@@ -514,6 +571,9 @@ async function generateAssessmentReport(sessionId, userId) {
             user: userId
           });
           await report.save();
+
+          // Send email to HR
+          await sendReportToHR(sessionId, userId, s3Key);
           
           resolve({
             s3Key,
@@ -527,10 +587,99 @@ async function generateAssessmentReport(sessionId, userId) {
       
       doc.end();
     });
+
   } catch (error) {
     console.error('Report generation failed:', error);
     throw error;
   }
+}
+
+async function waitForScores(sessionId) {
+  const maxAttempts = 30;
+  let attempts = 0;
+  
+  while (attempts < maxAttempts) {
+    const [testResult, recording, voiceAnswers] = await Promise.all([
+      TestResult.findOne({ assessmentSession: sessionId }),
+      Recording.findOne({ assessmentSession: sessionId }),
+      VoiceAnswer.find({ assessmentSession: sessionId })
+    ]);
+
+    // Enhanced check for text evaluation completion
+    const scoresReady = testResult && 
+      testResult.audioScore !== undefined && 
+      testResult.textScore !== undefined && // Ensure textScore is checked
+      testResult.videoScore !== undefined && 
+      testResult.combinedScore !== undefined;
+
+    const processingComplete = 
+      (!recording || recording.videoAnalysis?.status === 'completed') &&
+      voiceAnswers.every(a => 
+        (a.processingStatus === 'completed' || 
+         a.processingStatus === 'failed' ||
+         a.processingStatus === 'skipped') &&
+        (a.textEvaluation?.status === 'completed' ||
+         a.textEvaluation?.status === 'failed' ||
+         a.textEvaluation?.status === 'skipped')
+      );
+
+    if (scoresReady && processingComplete) {
+      return;
+    }
+    
+    attempts++;
+    await new Promise(resolve => setTimeout(resolve, 3000));
+  }
+  
+  throw new Error('Timeout waiting for scores to be calculated');
+}
+
+async function createScoreChart(scores) {
+  const canvas = createCanvas(800, 400);
+  const ctx = canvas.getContext('2d');
+  
+  // Chart styling and drawing logic
+  // ... (implementation of chart drawing)
+  
+  return canvas.toBuffer();
+}
+
+async function createEmotionChart(emotionData) {
+  const canvas = createCanvas(800, 400);
+  const ctx = canvas.getContext('2d');
+  
+  // Emotion chart drawing logic
+  // ... (implementation of emotion distribution chart)
+  
+  return canvas.toBuffer();
+}
+async function sendReportEmail(userEmail, reportUrl, candidateEmail, jobTitle) {
+  const mailOptions = {
+    from: `"SkillMatrix Reports" <${process.env.EMAIL_USER}>`,
+    to: userEmail,
+    subject: `Assessment Report for ${candidateEmail} - ${jobTitle}`,
+    html: `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+        <h2 style="color: #2563eb;">Assessment Report Ready</h2>
+        <p>The assessment report for candidate <strong>${candidateEmail}</strong> is now available.</p>
+        <p>Position: <strong>${jobTitle}</strong></p>
+        
+        <div style="text-align: center; margin: 20px 0;">
+          <a href="${reportUrl}" 
+             style="background-color: #2563eb; color: white; padding: 10px 20px; 
+                    text-decoration: none; border-radius: 5px; display: inline-block;">
+            Download Full Report
+          </a>
+        </div>
+        
+        <p style="color: #6b7280; font-size: 12px;">
+          This report contains confidential assessment data. Please handle appropriately.
+        </p>
+      </div>
+    `
+  };
+
+  await transporter.sendMail(mailOptions);
 }
 /*end points */
 app.get('/api/resumes/:resumeId', authenticateJWT, verifyOwnership(Resume), async (req, res) => {
@@ -1119,6 +1268,9 @@ async function calculateAndStoreScores(sessionId) {
   }
 }
 
+
+
+
 // Update the analyzeAudio function to handle WAV files
 const analyzeAudio = async (s3Keys) => {
   try {
@@ -1369,7 +1521,7 @@ async function processTranscription(answerId) {
         form, 
         {
           headers: form.getHeaders(),
-          timeout: 30000,
+
           maxContentLength: Infinity,
           maxBodyLength: Infinity
         }
@@ -2125,8 +2277,7 @@ app.post('/api/start-assessment-recording', async (req, res) => {
 // Updated complete-assessment endpoint
 // Enhanced complete-assessment endpoint
 app.post('/api/complete-assessment', async (req, res) => {
-  const { token, score, recordingId } = req.body;
-
+  const { token, score, recordingId, answers } = req.body;
   // Validate input
   if (!token || score === undefined) {
     return res.status(400).json({ 
@@ -2150,6 +2301,19 @@ app.post('/api/complete-assessment', async (req, res) => {
       return res.status(410).json({ 
         error: 'Assessment already completed, expired, or not found',
         code: 'SESSION_INVALID'
+      });
+    }
+
+
+     // 2. Update questions with user answers if provided
+    if (answers && Array.isArray(answers)) {
+      const updatedQuestions = session.questions.map(q => {
+        const answer = answers.find(a => a.id === q.id);
+        return answer ? { ...q, userAnswer: answer.userAnswer } : q;
+      });
+      
+      await AssessmentSession.findByIdAndUpdate(session._id, {
+        $set: { questions: updatedQuestions }
       });
     }
 // 2. Update the recording with session reference if not already set
@@ -2215,13 +2379,6 @@ if (recordingId) {
       }
     });
 
-     setTimeout(async () => {
-      try {
-        await generateAssessmentReport(session._id, session.user);
-      } catch (reportError) {
-        console.error('Background report generation failed:', reportError);
-      }
-    }, 0);
 
   } catch (error) {
     console.error('Assessment completion error:', error);
@@ -2639,12 +2796,82 @@ app.post('/api/complete-voice-assessment', async (req, res) => {
       });
     }
     
+    // Start background processing
+    processAssessmentCompletion(session._id, session.user);
+
     res.status(200).json({ success: true });
   } catch (error) {
     console.error('Error completing voice assessment:', error);
     res.status(500).json({ error: 'Failed to complete assessment' });
   }
 });
+
+
+async function processAssessmentCompletion(sessionId, userId) {
+  try {
+    // Wait for all scores to be calculated
+    await calculateAndStoreScores(sessionId);
+    
+    // Generate and store report
+    const report = await generateAssessmentReport(sessionId, userId);
+    
+    console.log('Assessment processing completed:', report);
+  } catch (error) {
+    console.error('Error in assessment completion processing:', error);
+  }
+}
+
+async function sendReportToHR(sessionId, userId, s3Key) {
+  try {
+    // Get session and user details
+    const [session, user] = await Promise.all([
+      AssessmentSession.findById(sessionId),
+      User.findById(userId)
+    ]);
+
+    if (!session || !user) {
+      throw new Error('Session or user not found');
+    }
+
+    // Generate signed URL for report
+    const command = new GetObjectCommand({
+      Bucket: process.env.S3_BUCKET_NAME,
+      Key: s3Key
+    });
+    const downloadUrl = await getSignedUrl(s3, command, { expiresIn: 604800 }); // 7 days
+
+    // Send email
+    const mailOptions = {
+      from: `"SkillMatrix Reports" <${process.env.EMAIL_USER}>`,
+      to: user.email,
+      subject: `Assessment Report for ${session.candidateEmail} - ${session.jobTitle}`,
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+          <h2 style="color: #2563eb;">Assessment Report Ready</h2>
+          <p>The assessment report for candidate <strong>${session.candidateEmail}</strong> is now available.</p>
+          <p>Position: <strong>${session.jobTitle}</strong></p>
+          
+          <div style="text-align: center; margin: 20px 0;">
+            <a href="${downloadUrl}" 
+               style="background-color: #2563eb; color: white; padding: 10px 20px; 
+                      text-decoration: none; border-radius: 5px; display: inline-block;">
+              Download Full Report
+            </a>
+          </div>
+          
+          <p style="color: #6b7280; font-size: 12px;">
+            This report contains confidential assessment data. Please handle appropriately.
+          </p>
+        </div>
+      `
+    };
+
+    await transporter.sendMail(mailOptions);
+  } catch (error) {
+    console.error('Error sending report to HR:', error);
+    throw error;
+  }
+}
 
 // File upload endpoint (supports both camera and screen recordings)
 // File upload endpoint (supports both camera and screen recordings)
