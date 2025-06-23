@@ -281,7 +281,14 @@ questions: [{
   startedAt: { type: Date, default: Date.now },
   completedAt: { type: Date },
   status: { type: String, enum: ['pending', 'in-progress', 'completed'], default: 'pending' },
-   user: { type: Schema.Types.ObjectId, ref: 'User', required: true } // Added
+   user: { type: Schema.Types.ObjectId, ref: 'User', required: true }, // Added
+
+    reportStatus: {
+    type: String,
+    enum: ['pending', 'processing', 'completed', 'failed'],
+    default: 'pending'
+  },
+  reportGeneratedAt: Date
   
 });
 
@@ -426,6 +433,8 @@ async function generateScoreChart(scores) {
   
   return canvas.toBuffer();
 }
+
+
 async function generateAssessmentReport(sessionId, userId) {
   try {
     // Wait for all scores to be processed
@@ -485,6 +494,7 @@ if (!session || !testResult) {
     const chartBuffer = await createScoreChart({
       mcq: testResult.score,
       audio: testResult.audioScore,
+            text: testResult.textScore, // Explicitly added
       video: testResult.videoScore,
       combined: testResult.combinedScore
     });
@@ -494,6 +504,7 @@ if (!session || !testResult) {
     doc.fontSize(12)
        .text(`MCQ Score: ${testResult.score}/100`, { continued: true })
        .text(` | Audio Score: ${testResult.audioScore}/100`, { continued: true })
+       .text(`Text Score: ${testResult.textScore?.toFixed(2) || 'N/A'}/100`) // Explicit text score
        .text(` | Video Score: ${testResult.videoScore}/100`)
        .text(`Combined Score: ${testResult.combinedScore}/100`)
        .moveDown();
@@ -523,6 +534,7 @@ voiceAnswers.forEach((answer, i) => {
   // Enhanced score display with proper null checks
   const audioScore = answer.audioAnalysis?.grading?.['Total Score'] ?? 'N/A';
   const textScore = answer.textEvaluation?.metrics?.total_average ?? 'N/A';
+      doc.text(`Text Evaluation Score: ${textScore}/100`);
   
   doc.text(`Audio Score: ${audioScore}/100`);
   doc.text(`Text Evaluation Score: ${textScore}/100`);
@@ -2312,16 +2324,19 @@ app.post('/api/complete-assessment', async (req, res) => {
         return answer ? { ...q, userAnswer: answer.userAnswer } : q;
       });
       
+      session.questions = updatedQuestions;
+    
+      
       await AssessmentSession.findByIdAndUpdate(session._id, {
         $set: { questions: updatedQuestions }
       });
     }
-// 2. Update the recording with session reference if not already set
-if (recordingId) {
-  await Recording.findByIdAndUpdate(recordingId, {
-    assessmentSession: session._id
-  });
-}
+      // 2. Update the recording with session reference if not already set
+      if (recordingId) {
+        await Recording.findByIdAndUpdate(recordingId, {
+          assessmentSession: session._id
+        });
+      }
 
     // 2. Create test result with atomic operations
     const testResult = await TestResult.findOneAndUpdate(
@@ -2394,6 +2409,34 @@ if (recordingId) {
       code: 'SERVER_ERROR',
       details: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
+  }
+});
+
+// Add this new endpoint to your server.js
+app.patch('/api/update-answer/:token', async (req, res) => {
+  try {
+    const { token } = req.params;
+    const { questionId, userAnswer } = req.body;
+
+    // Atomic update of the specific question answer
+    const result = await AssessmentSession.updateOne(
+      {
+        testLink: `${process.env.FRONTEND_URL}/assessment/${token}`,
+        'questions.id': questionId
+      },
+      {
+        $set: { 'questions.$.userAnswer': userAnswer }
+      }
+    );
+
+    if (result.nModified === 0) {
+      return res.status(404).json({ error: 'Question or session not found' });
+    }
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error updating answer:', error);
+    res.status(500).json({ error: 'Failed to update answer' });
   }
 });
 
@@ -2779,7 +2822,7 @@ app.post('/api/complete-voice-assessment', async (req, res) => {
   try {
     const session = await AssessmentSession.findOneAndUpdate(
       { testLink: `${process.env.FRONTEND_URL}/assessment/${token}` },
-      { 
+      {   
         $set: { 
           currentPhase: 'completed',
           status: 'completed',
@@ -2796,8 +2839,9 @@ app.post('/api/complete-voice-assessment', async (req, res) => {
       });
     }
     
-    // Start background processing
-    processAssessmentCompletion(session._id, session.user);
+  // Non-blocking processing
+    processAssessmentCompletion(session._id, session.user)
+      .catch(err => console.error('Background processing error:', err));
 
     res.status(200).json({ success: true });
   } catch (error) {
@@ -2809,18 +2853,42 @@ app.post('/api/complete-voice-assessment', async (req, res) => {
 
 async function processAssessmentCompletion(sessionId, userId) {
   try {
-    // Wait for all scores to be calculated
+    // 1. Atomic status check and update
+    const session = await AssessmentSession.findOneAndUpdate(
+      {
+        _id: sessionId,
+        reportStatus: { $in: ['pending', 'failed'] } // Only process if not already completed/processing
+      },
+      { $set: { reportStatus: 'processing' } },
+      { new: true }
+    );
+
+    if (!session) {
+      console.log('Report already being processed or completed for session:', sessionId);
+      return;
+    }
+
+    // 2. Generate report (existing logic)
     await calculateAndStoreScores(sessionId);
-    
-    // Generate and store report
     const report = await generateAssessmentReport(sessionId, userId);
-    
-    console.log('Assessment processing completed:', report);
+
+    // 3. Mark as completed
+    await AssessmentSession.findByIdAndUpdate(sessionId, {
+      reportStatus: 'completed',
+      reportGeneratedAt: new Date()
+    });
+
+    console.log('Successfully processed assessment:', sessionId);
+    return report;
   } catch (error) {
-    console.error('Error in assessment completion processing:', error);
+    // 4. Handle failures
+    await AssessmentSession.findByIdAndUpdate(sessionId, {
+      reportStatus: 'failed'
+    });
+    console.error('Failed to process assessment:', error);
+    throw error;
   }
 }
-
 async function sendReportToHR(sessionId, userId, s3Key) {
   try {
     // Get session and user details
