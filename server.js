@@ -409,194 +409,174 @@ const verifyOwnership = (model) => async (req, res, next) => {
 };
 /* report generation */
 
-// Add these with your other utility functions
-async function generateScoreChart(scores) {
-  const { createCanvas } = require('canvas');
-  const canvas = createCanvas(400, 200);
-  const ctx = canvas.getContext('2d');
-  
-  ctx.fillStyle = '#ffffff';
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-  
-  ctx.fillStyle = '#007bff';
-  ctx.fillRect(50, 200 - scores.mcq * 2, 60, scores.mcq * 2);
-  ctx.fillRect(150, 200 - scores.audio * 2, 60, scores.audio * 2);
-  ctx.fillRect(250, 200 - scores.video * 2, 60, scores.video * 2);
-  ctx.fillRect(350, 200 - scores.combined * 2, 60, scores.combined * 2);
-  
-  ctx.fillStyle = '#000000';
-  ctx.font = '12px Arial';
-  ctx.fillText('MCQ', 60, 190);
-  ctx.fillText('Audio', 160, 190);
-  ctx.fillText('Video', 260, 190);
-  ctx.fillText('Overall', 360, 190);
-  
-  return canvas.toBuffer();
-}
 
+
+const logoPath = path.join(__dirname, 'assets', 'SMlogo.png');
 
 async function generateAssessmentReport(sessionId, userId) {
   try {
-    // Wait for all scores to be processed
     await waitForScores(sessionId);
 
-    const [session, testResult, voiceAnswers, recording] = await Promise.all([
+    const [session, testResult, voiceAnswers] = await Promise.all([
       AssessmentSession.findById(sessionId)
         .populate('resumeId')
         .populate('jobDescriptionId')
         .populate('user'),
       TestResult.findOne({ assessmentSession: sessionId }),
       VoiceAnswer.find({ assessmentSession: sessionId }),
-      Recording.findOne({ assessmentSession: sessionId })
     ]);
 
-if (!session || !testResult) {
-      throw new Error('Assessment data not found');
-    }
+    if (!session || !testResult) throw new Error('Assessment data not found');
 
-    // Verify all processing is complete
-    const incompleteAudio = voiceAnswers.some(a => 
-      a.audioAnalysis?.status !== 'completed' && 
-      a.audioAnalysis?.status !== 'failed' &&
-      a.audioAnalysis?.status !== 'skipped'
-    );
-
-    const incompleteText = voiceAnswers.some(a => 
-      a.textEvaluation?.status !== 'completed' && 
-      a.textEvaluation?.status !== 'failed' &&
-      a.textEvaluation?.status !== 'skipped'
-    );
-
-    if (incompleteAudio || incompleteText || 
-        (recording && recording.videoAnalysis?.status !== 'completed')) {
-      throw new Error('Some evaluations are still processing');
-    }
-
-    const doc = new PDFDocument({ margin: 50 });
+    const doc = new PDFDocument({ size: 'A4', margin: 0 });
     const buffers = [];
     doc.on('data', buffers.push.bind(buffers));
 
+    const drawPageBackground = () => {
+      const width = doc.page.width;
+      const height = doc.page.height;
 
+      const gradient = doc.linearGradient(0, 0, width, 0);
+      gradient.stop(0, '#10b981').stop(1, '#3b82f6');
+      doc.rect(0, 0, width, height).fill(gradient);
 
-    // Candidate Information
-    doc.fontSize(14).text('Candidate Information', { underline: true });
-    doc.fontSize(12)
-       .text(`Name: ${session.candidateEmail}`)
-       .text(`Position: ${session.jobTitle}`)
-       .text(`Assessment Date: ${session.completedAt.toLocaleDateString()}`)
-       .moveDown();
+      doc.fillColor('white').roundedRect(40, 40, width - 80, height - 80, 10).fill();
 
-    // Scores Summary with Charts
-    doc.addPage()
-       .fontSize(14).text('Performance Summary', { underline: true });
-
-    // Create score chart
-    const chartBuffer = await createScoreChart({
-      mcq: testResult.score,
-      audio: testResult.audioScore,
-            text: testResult.textScore, // Explicitly added
-      video: testResult.videoScore,
-      combined: testResult.combinedScore
-    });
-    doc.image(chartBuffer, 50, 100, { width: 500 });
-
-    // Detailed Scores
-    doc.fontSize(12)
-       .text(`MCQ Score: ${testResult.score}/100`, { continued: true })
-       .text(` | Audio Score: ${testResult.audioScore}/100`, { continued: true })
-       .text(`Text Score: ${testResult.textScore?.toFixed(2) || 'N/A'}/100`) // Explicit text score
-       .text(` | Video Score: ${testResult.videoScore}/100`)
-       .text(`Combined Score: ${testResult.combinedScore}/100`)
-       .moveDown();
-
-    // MCQ Section
-    doc.addPage()
-       .fontSize(14).text('MCQ Assessment', { underline: true });
-    
-    session.questions.forEach((q, i) => {
-      doc.fontSize(12).text(`Q${i+1}: ${q.question}`);
-      doc.fontSize(10)
-         .text(`Candidate Answer: ${q.userAnswer || 'Not answered'}`)
-         .text(`Correct Answer: ${q.correctAnswer}`)
-         .moveDown();
-    });
-
-    // Voice Assessment Section
-    doc.addPage()
-       .fontSize(14).text('Voice Assessment', { underline: true });
-    
- // Updated generateAssessmentReport function
-voiceAnswers.forEach((answer, i) => {
-  doc.fontSize(12).text(`Q${i+1}: ${answer.question}`);
-  doc.fontSize(10)
-     .text(`Transcript: ${answer.answer || 'No answer provided'}`);
-  
-  // Enhanced score display with proper null checks
-  const audioScore = answer.audioAnalysis?.grading?.['Total Score'] ?? 'N/A';
-  const textScore = answer.textEvaluation?.metrics?.total_average ?? 'N/A';
-      doc.text(`Text Evaluation Score: ${textScore}/100`);
-  
-  doc.text(`Audio Score: ${audioScore}/100`);
-  doc.text(`Text Evaluation Score: ${textScore}/100`);
-  
-  // Add detailed text metrics if available
-  if (answer.textEvaluation?.metrics) {
-    doc.moveDown(0.5);
-    doc.fontSize(10).text('Detailed Text Analysis:', { underline: true });
-    Object.entries(answer.textEvaluation.metrics).forEach(([key, value]) => {
-      if (key !== 'total_average' && key !== 'total_overall_score') {
-        doc.text(`${key}: ${value.toFixed(2)}`);
+      if (fs.existsSync(logoPath)) {
+        doc.image(logoPath, width - 90, 50, { width: 40 });
       }
-    });
-  }
-  
-  doc.moveDown();
+    };
+
+    const drawSectionBox = (height = 300) => {
+      const width = doc.page.width;
+      const y = doc.y + 10;
+      doc.fillColor('white').roundedRect(60, y, width - 120, height, 8).fill();
+      doc.moveDown(1);
+      return y;
+    };
+
+    drawPageBackground();
+    doc.on('pageAdded', drawPageBackground);
+
+    // Title
+    doc.fontSize(24).fillColor('#0f172a').font('Helvetica-Bold')
+      .text('SkillMatrix AI Assessment Report', 0, 100, { align: 'center' });
+
+    // Candidate Info
+    doc.moveDown(2);
+    doc.fillColor('#1e293b').fontSize(14).text('Candidate Information', 60, doc.y, { underline: true });
+    doc.moveDown(0.5);
+    doc.font('Helvetica').fontSize(12).fillColor('#334155')
+      .text(`Email: ${session.candidateEmail}`, 60)
+      .text(`Position: ${session.jobTitle}`, 60)
+      .text(`Assessment Date: ${session.completedAt.toLocaleDateString()}`, 60);
+
+    // Performance Summary
+ doc.addPage();
+const chartY = drawSectionBox(400); // increased height
+doc.fillColor('#1e293b').fontSize(14)
+  .text('Performance Summary', 70, chartY + 10, { underline: true });
+
+const chartBuffer = await createScoreChart({
+  mcq: testResult.score,
+  audio: testResult.audioScore,
+  text: testResult.textScore,
+  video: testResult.videoScore,
+  combined: testResult.combinedScore,
 });
 
-    // Video Analysis Section
-    if (recording?.videoAnalysis) {
-      doc.addPage()
-         .fontSize(14).text('Video Analysis', { underline: true });
-      
-      doc.text(`Dominant Emotion: ${recording.videoAnalysis.emotions.dominant_emotion}`);
-      doc.text(`Video Score: ${recording.videoAnalysis.video_score}/100`);
-      
-      // Add emotion distribution chart
-      const emotionChart = await createEmotionChart(recording.videoAnalysis.emotions);
-      doc.image(emotionChart, 50, doc.y, { width: 400 });
-    }
+doc.image(chartBuffer, 110, chartY + 40, { fit: [400, 250] }); // moved down to avoid overlap
 
-    // Finalize PDF
+    doc.fontSize(12).fillColor('#475569')
+      .text(`MCQ Score: ${testResult.score.toFixed(2)}/100`, 60, chartY + 280)
+      .text(`Audio Score: ${testResult.audioScore.toFixed(2)}/100`, 60)
+      .text(`Text Score: ${testResult.textScore?.toFixed(2) || 'N/A'}/100`, 60)
+      .text(`Video Score: ${testResult.videoScore.toFixed(2)}/100`, 60)
+      .text(`Combined Score: ${testResult.combinedScore.toFixed(2)}/100`, 60);
+
+    // MCQ Section
+ doc.addPage();
+const headingY = drawSectionBox(60);
+doc.fillColor('#1e293b').fontSize(14)
+  .text('MCQ Assessment Details', 70, headingY + 15, { underline: true });
+doc.moveDown(1);
+
+
+    session.questions.forEach((q, i) => {
+      if (doc.y > 680) doc.addPage();
+      const y = drawSectionBox(100);
+      doc.fontSize(12).fillColor('#334155').font('Helvetica-Bold')
+        .text(`Q${i + 1}: ${q.question}`, 80, y + 15);
+      doc.font('Helvetica').fontSize(10).fillColor('#64748b')
+        .text(`Candidate Answer: ${q.userAnswer || 'Not answered'}`, 100)
+        .text(`Correct Answer: ${q.correctAnswer}`, 100);
+      doc.moveDown(2);
+    });
+
+    // Voice Section
+doc.addPage();
+const voiceY = drawSectionBox(); // Use default height or specify
+doc.fillColor('#1e293b').fontSize(14)
+  .text('Voice Assessment', 70, voiceY + 15, { underline: true });
+doc.moveDown(1);
+
+
+
+    voiceAnswers.forEach((answer, i) => {
+      if (doc.y > 600) doc.addPage();
+      const audioScore = answer.audioAnalysis?.grading?.['Total Score'] ?? 0;
+      const textScore = answer.textEvaluation?.metrics?.total_average ?? 0;
+      const metrics = answer.textEvaluation?.metrics || {};
+
+      const boxHeight = 160 + (Object.keys(metrics).length * 12);
+      const y = drawSectionBox(boxHeight);
+const boxStartX = 80;
+
+doc.fontSize(12).fillColor('#334155').font('Helvetica-Bold')
+  .text(`Q${i + 1}: ${answer.question}`, boxStartX, y + 15, {
+    width: doc.page.width - 160,
+    lineBreak: true,
+  });
+
+doc.fontSize(10).font('Helvetica').fillColor('#64748b')
+  .text(`Answer: ${answer.answer || 'No answer provided'}`, boxStartX + 20, doc.y, {
+    width: doc.page.width - 160,
+    lineBreak: true,
+  })
+  .text(`Audio Score: ${Number(audioScore).toFixed(2)}/100`, boxStartX + 20)
+  .text(`Text Evaluation Score: ${Number(textScore).toFixed(2)}/100`, boxStartX + 20);
+
+if (metrics) {
+  doc.moveDown(0.2);
+  doc.font('Helvetica-Bold').text('Detailed Text Metrics:', boxStartX + 20, doc.y);
+  doc.font('Helvetica');
+  Object.entries(metrics).forEach(([key, value]) => {
+    if (!['total_average', 'total_overall_score'].includes(key)) {
+      const val = typeof value === 'number' ? value.toFixed(2) : value;
+      doc.text(`• ${key}: ${val}`, boxStartX + 40, doc.y);
+    }
+  });
+}
+
+
+      doc.moveDown(2);
+    });
+
     return new Promise((resolve, reject) => {
       doc.on('end', async () => {
         try {
           const pdfBuffer = Buffer.concat(buffers);
           const filename = `report_${sessionId}_${Date.now()}.pdf`;
           const s3Key = `reports/${filename}`;
-          
           await uploadToS3(pdfBuffer, s3Key, 'application/pdf');
-          
-          const report = new Report({
-            assessmentSession: sessionId,
-            s3Key,
-            filename,
-            user: userId
-          });
+          const report = new Report({ assessmentSession: sessionId, s3Key, filename, user: userId });
           await report.save();
-
-          // Send email to HR
           await sendReportToHR(sessionId, userId, s3Key);
-          
-          resolve({
-            s3Key,
-            filename,
-            reportId: report._id
-          });
+          resolve({ s3Key, filename, reportId: report._id });
         } catch (err) {
           reject(err);
         }
       });
-      
       doc.end();
     });
 
@@ -605,6 +585,40 @@ voiceAnswers.forEach((answer, i) => {
     throw error;
   }
 }
+
+
+
+
+async function createScoreChart(scores) {
+  const canvas = createCanvas(700, 400);
+  const ctx = canvas.getContext('2d');
+  const keys = Object.keys(scores);
+  const values = Object.values(scores).map(val => Number(val.toFixed(2)));
+
+  const barWidth = 60;
+  const gap = 30;
+  const startX = 50;
+  const baseY = 350;
+
+  ctx.fillStyle = '#f8fafc';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.font = 'bold 13px sans-serif';
+
+  keys.forEach((key, i) => {
+    const x = startX + i * (barWidth + gap);
+    const height = (values[i] / 100) * 250;
+
+    ctx.fillStyle = '#3b82f6';
+    ctx.fillRect(x, baseY - height, barWidth, height);
+
+    ctx.fillStyle = '#1e293b';
+    ctx.fillText(`${values[i]}`, x + 5, baseY - height - 10);
+    ctx.fillText(key, x + 5, baseY + 20);
+  });
+
+  return canvas.toBuffer();
+}
+
 
 async function waitForScores(sessionId) {
   const maxAttempts = 30;
@@ -640,31 +654,13 @@ async function waitForScores(sessionId) {
     }
     
     attempts++;
-    await new Promise(resolve => setTimeout(resolve, 3000));
+  await new Promise(resolve => setTimeout(resolve, 2 * 60 * 1000)); // 5 minutes
+
   }
   
   throw new Error('Timeout waiting for scores to be calculated');
 }
 
-async function createScoreChart(scores) {
-  const canvas = createCanvas(800, 400);
-  const ctx = canvas.getContext('2d');
-  
-  // Chart styling and drawing logic
-  // ... (implementation of chart drawing)
-  
-  return canvas.toBuffer();
-}
-
-async function createEmotionChart(emotionData) {
-  const canvas = createCanvas(800, 400);
-  const ctx = canvas.getContext('2d');
-  
-  // Emotion chart drawing logic
-  // ... (implementation of emotion distribution chart)
-  
-  return canvas.toBuffer();
-}
 async function sendReportEmail(userEmail, reportUrl, candidateEmail, jobTitle) {
   const mailOptions = {
     from: `"SkillMatrix Reports" <${process.env.EMAIL_USER}>`,
@@ -882,7 +878,7 @@ app.get('/api/candidate-filtering', authenticateJWT, async (req, res) => {
 // Add this new endpoint while keeping all existing endpoints
 app.get('/api/candidates/segmented', authenticateJWT, async (req, res) => {
   try {
-  const cutoffTime = new Date(Date.now() - 1 * 60 * 1000); // 24 hours ago'
+  const cutoffTime = new Date(Date.now() - 24 * 60 * 60 * 1000); // 24 hours ago'
 
     
     // First get all needed data (same as original endpoint)
@@ -1742,7 +1738,6 @@ async function analyzeVideoFile(file) {
         'Content-Length': form.getLengthSync()
       },
       maxBodyLength: Infinity,
-      timeout: 300000
     });
 
     if (!response.data?.emotion_results) {
