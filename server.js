@@ -602,7 +602,8 @@ async function createScoreChart(scores) {
 
   ctx.fillStyle = '#f8fafc';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
-  ctx.font = 'bold 13px sans-serif';
+ctx.font = 'bold 13px "DejaVu Sans"';
+
 
   keys.forEach((key, i) => {
     const x = startX + i * (barWidth + gap);

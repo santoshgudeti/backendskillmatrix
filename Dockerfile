@@ -13,7 +13,10 @@ RUN apk add --no-cache \
   pango-dev \
   jpeg-dev \
   giflib-dev \
-  librsvg-dev
+  librsvg-dev \
+  fontconfig \
+  ttf-dejavu \
+  ttf-freefont
  
 # Set environment variable for node-gyp
 ENV PYTHON=/usr/bin/python3
