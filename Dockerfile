@@ -1,22 +1,38 @@
-# Use official Node.js LTS image
+# Use official Node.js Alpine image
 FROM node:20-alpine
-
+ 
 # Set working directory
 WORKDIR /usr/src/app
-
-# Install dependencies separately for better caching
+ 
+# Install required build tools and libraries for canvas
+RUN apk add --no-cache \
+  python3 \
+  make \
+  g++ \
+  cairo-dev \
+  pango-dev \
+  jpeg-dev \
+  giflib-dev \
+  librsvg-dev
+ 
+# Set environment variable for node-gyp
+ENV PYTHON=/usr/bin/python3
+ 
+# Copy dependency definitions
 COPY package*.json ./
-RUN npm ci --only=production
-
-# Copy application source
+ 
+# Install only production dependencies
+RUN npm i --only=production
+ 
+# Copy application source code
 COPY . .
-
-# Expose port (change if your app uses a different port)
-EXPOSE 5000
-
-# Use non-root user for security
+ 
+# Create non-root user and switch to it
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup
 USER appuser
-
-# Start the server
+ 
+# Expose the app's port
+EXPOSE 5000
+ 
+# Default command to run the app
 CMD ["npm", "start"]
