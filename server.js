@@ -10,7 +10,7 @@ const crypto = require('crypto'); // For hash calculation
 const { Schema } = mongoose;
 const os = require("os"); // Added for cross-platform temp dir
 const http = require('http');
-
+const { v4: uuidv4 } = require('uuid');
 const { Server } = require('socket.io');
 const fs = require('fs');
 const path = require('path');
@@ -34,6 +34,7 @@ const PDFDocument = require('pdfkit');
 const Chart = require('chart.js');
 const { createCanvas } = require('canvas');
 const htmlToPdf = require('html-pdf');
+const sendConsentEmail = require('./services/sendConsentMail'); // Or wherever you place it
 
 
 dotenv.config();
@@ -133,6 +134,9 @@ const userSchema = new mongoose.Schema({
 
 const User = mongoose.model('User', userSchema);
 
+
+
+
 const ResumeSchema = new Schema({
   title: String,
   s3Key: { type: String, required: true }, // Make this required
@@ -157,10 +161,15 @@ const ApiResponseSchema = new Schema({
   jobDescriptionId: { type: Schema.Types.ObjectId, ref: 'JobDescription', required: true },
   matchingResult: Object,
   createdAt: { type: Date, default: Date.now },
-  hash: { type: String, unique: true }, // Hash to avoid duplicate processing
-    user: { type: Schema.Types.ObjectId, ref: 'User', required: true } // Added
-
+  hash: { type: String, unique: true },
+  user: { type: Schema.Types.ObjectId, ref: 'User', required: true },
+  candidateConsent: {
+    allowedToShare: { type: Boolean, default: false },
+    message: { type: String },
+    respondedAt: { type: Date }
+  }
 });
+
 const Resume = mongoose.model('Resume', ResumeSchema);
 const JobDescription = mongoose.model('JobDescription', JobDescriptionSchema);
 const ApiResponse = mongoose.model('ApiResponse', ApiResponseSchema);
@@ -325,6 +334,54 @@ const ReportSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 const Report = mongoose.model('Report', ReportSchema);
+
+
+// ==============================
+// ✅ NEW SCHEMAS
+// ==============================
+const jobPosterSchema = new mongoose.Schema({
+  name: String,
+  email: { type: String, required: true, unique: true },
+  password: { type: String, required: true },
+  isVerified: { type: Boolean, default: false },
+}, { timestamps: true });
+const jobPostSchema = new mongoose.Schema({
+  title: String,
+  companyName: String, // NEW FIELD ADDED
+  location: String,
+  experience: String,
+  jobType: String,
+  department: String,
+  skillsRequired: [String],
+  salaryRange: String,
+  jobDescriptionFile: String,
+  descriptionText: String,
+  publicId: { type: String, unique: true },
+  applications: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Application' }],
+  createdAt: { type: Date, default: Date.now },
+  postedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'JobPoster' },
+});
+
+const JobPoster = mongoose.model('JobPoster', jobPosterSchema);
+const JobPost = mongoose.model('JobPost', jobPostSchema);
+const applicationSchema = new mongoose.Schema({
+  jobId: { type: mongoose.Schema.Types.ObjectId, ref: 'JobPost', required: true },
+  candidateName: { type: String, required: true },
+  candidateEmail: { type: String, required: true },
+  candidatePhone: String,
+  resumeFile: String, // S3 key
+  appliedAt: { type: Date, default: Date.now }
+});
+
+const Application = mongoose.model('Application', applicationSchema);
+
+
+
+// ==============================
+// ✅ JOB PORTAL AUTH ROUTES
+// ==============================
+
+
 // Add near the top with other helper functions
 
 const outputDir = path.join(os.tmpdir(), `whisper_${Date.now()}`);
@@ -362,6 +419,39 @@ const isAdmin = (req, res, next) => {
   if (!req.user.isAdmin) return res.status(403).json({ message: 'Admin access required.' });
   next();
 };
+// Modify authenticateJobPoster middleware in server.js
+function authenticateJobPoster(req, res, next) {
+  const token = req.cookies?.jobToken || req.headers.authorization?.split(' ')[1];
+  const adminToken = req.cookies?.token || req.headers.authorization?.split(' ')[1];
+  
+  // First try normal HR auth
+  if (token) {
+    try {
+      const decoded = jwt.verify(token, JWT_SECRET);
+      req.user = decoded;
+      return next();
+    } catch (err) {
+      // Continue to admin check
+    }
+  }
+  
+  // Then try admin auth
+  if (adminToken) {
+    try {
+      const decoded = jwt.verify(adminToken, JWT_SECRET);
+      if (decoded.isAdmin) {
+        req.user = { isAdmin: true };
+        return next();
+      }
+    } catch (err) {
+      return res.status(403).json({ message: 'Invalid token' });
+    }
+  }
+  
+  return res.status(401).json({ message: 'Login required' });
+}
+
+
 
 const verifyOwnership = (model) => async (req, res, next) => {
   try {
@@ -691,6 +781,8 @@ async function sendReportEmail(userEmail, reportUrl, candidateEmail, jobTitle) {
   await transporter.sendMail(mailOptions);
 }
 /*end points */
+
+
 app.get('/api/resumes/:resumeId', authenticateJWT, verifyOwnership(Resume), async (req, res) => {
   try {
     const { resumeId } = req.params;
@@ -924,6 +1016,135 @@ app.get('/api/candidates/segmented', authenticateJWT, async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch segmented candidates.' });
   }
 });
+app.get('/api/consent/:apiResponseId', async (req, res) => {
+  const { apiResponseId } = req.params;
+  const { allow } = req.query;
+
+  try {
+    if (allow !== 'true') {
+      return res.status(400).send('❌ Invalid or missing consent flag.');
+    }
+
+    const updated = await ApiResponse.findByIdAndUpdate(
+      apiResponseId,
+      { candidateConsent: { allowedToShare: true, createdAt: new Date() } },
+      { new: true }
+    );
+
+    if (!updated) return res.status(404).send('❌ Consent not found');
+
+  res.send(`
+  <html>
+    <head>
+      <title>Consent Submitted</title>
+      <style>
+        body {
+          font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+          background: linear-gradient(135deg, #4f46e5, #6ee7b7);
+          color: white;
+          height: 100vh;
+          margin: 0;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          flex-direction: column;
+          animation: fadeIn 1s ease-in;
+        }
+
+        .card {
+          background: rgba(255, 255, 255, 0.1);
+          border-radius: 16px;
+          padding: 30px 40px;
+          box-shadow: 0 8px 20px rgba(0,0,0,0.25);
+          text-align: center;
+          backdrop-filter: blur(10px);
+          max-width: 500px;
+        }
+
+        h2 {
+          font-size: 2.2rem;
+          margin-bottom: 15px;
+        }
+
+        p {
+          font-size: 1.2rem;
+          margin-bottom: 10px;
+        }
+
+        .tick {
+          font-size: 4rem;
+          margin-bottom: 10px;
+          animation: bounce 0.8s ease-out;
+        }
+
+        @keyframes fadeIn {
+          from { opacity: 0; transform: translateY(-10px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
+
+        @keyframes bounce {
+          0%   { transform: scale(0.8); }
+          50%  { transform: scale(1.2); }
+          100% { transform: scale(1); }
+        }
+      </style>
+    </head>
+    <body>
+      <div class="card">
+        <div class="tick">✅</div>
+        <h2>Consent Submitted</h2>
+        <p>Thank you for your response.</p>
+        <p>Your profile will now be visible to recruiters who are actively hiring.</p>
+      </div>
+    </body>
+  </html>
+`);
+
+  } catch (error) {
+    console.error('Consent update failed:', error.message);
+    res.status(500).send('❌ Internal error');
+  }
+});
+
+// ✅ FILE: server.js (or routes file)
+app.get('/api/recommendations/candidates', authenticateJWT, async (req, res) => {
+  try {
+    // ✅ Final logic — fetch all candidates who gave consent
+    const query = {
+      'candidateConsent.allowedToShare': true
+    };
+
+    const sharedResponses = await ApiResponse.find(query)
+      .populate('resumeId', 'title filename')
+      .populate('jobDescriptionId', 'title filename')
+      .sort({ createdAt: -1 });
+
+    const testScores = await TestResult.find();
+    const sessions = await AssessmentSession.find()
+      .populate('recording')
+      .populate('testResult');
+
+    const enriched = sharedResponses.map(candidate => {
+      const email = candidate.matchingResult?.[0]?.["Resume Data"]?.email;
+      const testScore = testScores.find(ts => ts.candidateEmail === email);
+      const session = sessions.find(s => s.candidateEmail === email);
+
+      return {
+        ...candidate.toObject(),
+        testScore: testScore || null,
+        assessmentSession: session || null
+      };
+    });
+
+    res.status(200).json(enriched);
+  } catch (error) {
+    console.error('Error fetching recommended candidates:', error);
+    res.status(500).json({ error: 'Failed to fetch recommended candidates.' });
+  }
+});
+
+
+
 
 // WebSocket connection handler
 io.on('connection', (socket) => {
@@ -1142,14 +1363,28 @@ app.post('/api/submit',authenticateJWT,checkSubscription,checkUsageLimits('jdUpl
 
           if (apiResponse.data && apiResponse.data['POST Response']) {
             const savedResponse = new ApiResponse({
-              resumeId: resumeDoc._id,
-              jobDescriptionId: jobDescDoc._id,
-              matchingResult: apiResponse.data['POST Response'],
-              hash: `${resumeHash}-${jdHash}`,
-                  user: req.user.id
-            });
-            await savedResponse.save();
-            emitApiResponseUpdate(savedResponse);
+  resumeId: resumeDoc._id,
+  jobDescriptionId: jobDescDoc._id,
+  matchingResult: apiResponse.data['POST Response'],
+  hash: `${resumeHash}-${jdHash}`,
+  user: req.user.id
+});
+await savedResponse.save();  // <-- Candidate consent is default false
+
+// ✅ SEND CANDIDATE EMAIL HERE (with link to give consent)
+const extractedEmail = apiResponse.data['POST Response']?.[0]?.["Resume Data"]?.email;
+
+if (extractedEmail) {
+  await sendConsentEmail(extractedEmail, savedResponse._id);
+  console.log(`📨 Sending consent email to: ${extractedEmail}`);
+
+} else {
+  console.warn(`⚠️ No email found in API response for ${resume.originalname}`);
+}
+
+
+emitApiResponseUpdate(savedResponse);
+
 
             results.push({
               resumeId: resumeDoc._id,
@@ -1814,28 +2049,25 @@ async function streamToBuffer(stream) {
   });
 }
 
-// Enhanced upload to S3 with retries
-async function uploadToS3(fileData, key, contentType) {
-  try {
-    // Ensure we have valid file data
-    if (!fileData) {
-      throw new Error('No file data provided');
-    }
 
-    // Convert buffer to stream if needed
+// ✅ AFTER — UPDATED uploadToS3 for folder structure in single bucket
+async function uploadToS3(fileData, key, contentType, bucket = process.env.S3_BUCKET_NAME) {
+  try {
+    if (!fileData) throw new Error('No file data provided');
+
     const body = fileData instanceof Buffer ? Readable.from(fileData) : fileData;
 
     const upload = new Upload({
       client: s3,
       params: {
-        Bucket: process.env.S3_BUCKET_NAME,
-        Key: key,
+        Bucket: bucket, // 🔄 Always skillmatrixaws (default)
+        Key: key, // 🔄 Example: job_descriptions/JD_filename.pdf
         Body: body,
         ContentType: contentType
       },
-      queueSize: 4, // Optional concurrency configuration
-      partSize: 1024 * 1024 * 5, // Optional part size (5MB)
-      leavePartsOnError: false // Clean up failed uploads
+      queueSize: 4,
+      partSize: 1024 * 1024 * 5,
+      leavePartsOnError: false
     });
 
     upload.on('httpUploadProgress', progress => {
@@ -1843,19 +2075,19 @@ async function uploadToS3(fileData, key, contentType) {
     });
 
     const result = await upload.done();
+    console.log(`✅ S3 Upload Success: ${key} to bucket ${bucket}`);
     return result;
   } catch (error) {
-    console.error('Error uploading to S3:', {
+    console.error('S3 Upload Error:', {
       message: error.message,
       stack: error.stack,
-      key: key,
-      contentType: contentType,
+      key,
+      contentType,
       timestamp: new Date().toISOString()
     });
     throw error;
   }
 }
-
 
 
 /* endpoints related to the test evaluation an test platfrom */
@@ -3758,6 +3990,343 @@ app.get('/user', authenticateJWT, async (req, res) => {
   }
 });
 
+// Register
+app.post('/jobportal/register', async (req, res) => {
+  const { name, email, password } = req.body;
+  const blocked = ['gmail.com', 'yahoo.com', 'hotmail.com'];
+  const domain = email.split('@')[1];
+  if (blocked.includes(domain)) {
+    return res.status(400).json({ message: 'Only company emails allowed.' });
+  }
+  const existing = await JobPoster.findOne({ email });
+  if (existing) return res.status(400).json({ message: 'Email already registered.' });
+
+  const hashedPassword = await bcrypt.hash(password, 10);
+  const newUser = await JobPoster.create({ name, email, password: hashedPassword });
+
+  const token = jwt.sign({ id: newUser._id }, JWT_SECRET, { expiresIn: '1h' });
+  const verifyLink = `${process.env.BACKEND_URL}/jobportal/verify?token=${token}`;
+
+  await transporter.sendMail({
+    to: email,
+    from: `"SkillMatrix Jobs" <${process.env.EMAIL_USER}>`,
+    subject: 'Verify your email for Job Posting',
+    html: `<p>Please verify your email: <a href="${verifyLink}">Verify Now</a></p>`
+  });
+  res.status(200).json({ message: 'Verification email sent.' });
+});
+
+// Verify
+app.get('/jobportal/verify', async (req, res) => {
+  try {
+    const { token } = req.query;
+    const decoded = jwt.verify(token, JWT_SECRET);
+    const user = await JobPoster.findById(decoded.id);
+    if (!user) return res.render('verifyError', { errorMessage: 'Invalid user.' });
+    user.isVerified = true;
+    await user.save();
+    res.render('verifySuccess');
+  } catch (e) {
+    res.render('verifyError', { errorMessage: 'Invalid or expired token.' });
+  }
+});
+
+// Login
+app.post('/jobportal/login', async (req, res) => {
+  const { email, password } = req.body;
+  const user = await JobPoster.findOne({ email });
+  if (!user) return res.status(400).json({ message: 'Invalid credentials.' });
+  if (!user.isVerified) return res.status(400).json({ message: 'Please verify your email.' });
+
+  const valid = await bcrypt.compare(password, user.password);
+  if (!valid) return res.status(400).json({ message: 'Invalid credentials.' });
+const token = jwt.sign({ _id: user._id, email: user.email }, JWT_SECRET);
+
+  res.cookie('jobToken', token, {
+    httpOnly: true,
+    sameSite: 'Strict',
+    secure: process.env.NODE_ENV === 'production'
+  });
+  res.status(200).json({ message: 'Login successful' });
+});
+// Get job by publicId
+app.get('/public/job/:publicId', async (req, res) => {
+  try {
+    const job = await JobPost.findOne({ publicId: req.params.publicId })
+      .populate('postedBy', 'name email');
+    
+    if (!job) {
+      return res.status(404).json({ error: 'Job not found' });
+    }
+
+    res.json(job);
+  } catch (error) {
+    console.error('Error fetching public job:', error);
+    res.status(500).json({ error: 'Failed to fetch job details' });
+  }
+});
+// ✅ Job Posting Route
+app.post('/jobportal/post', authenticateJobPoster, upload.single('jobDescription'), async (req, res) => {
+  try {
+     console.log('Received data:', req.body); // Add this for debugging
+    const {
+      title,
+      companyName, // NEW FIELD
+      location,
+      experience,
+      jobType,
+      department,
+      skillsRequired,
+      salaryRange,
+      descriptionText
+    } = req.body;
+
+    let s3Key = '';
+    const file = req.file;
+
+    if (file) {
+      const safeTitle = title.replace(/\s+/g, '_');
+      const fileName = `JD_${safeTitle}_${Date.now()}_${uuidv4()}${path.extname(file.originalname)}`;
+      const folderPrefix = process.env.S3_JD_FOLDER || 'jobposting-jd-files';
+      const key = `${folderPrefix}/${fileName}`;
+      const result = await uploadToS3(file.buffer, key, file.mimetype);
+      s3Key = result?.Key || key;
+    }
+
+    const job = new JobPost({
+      title,
+      companyName, // NEW FIELD
+      location,
+      experience,
+      jobType,
+      department,
+      skillsRequired: skillsRequired?.split(',').map(skill => skill.trim()) || [],
+      salaryRange,
+      descriptionText,
+      jobDescriptionFile: s3Key,
+      postedBy: req.user._id
+    });
+
+    await job.save();
+    return res.status(201).json({ message: 'Job posted successfully!', jobId: job._id });
+  } catch (err) {
+    console.error('Error in Job Posting:', err);
+    return res.status(500).json({ message: 'Failed to post job' });
+  }
+});
+
+// ✅ View JD File via Signed URL
+// Updated view-jd endpoint to handle resume downloads
+
+app.get('/jobportal/myjobs', authenticateJobPoster, async (req, res) => {
+  try {
+    const jobs = await JobPost.find({ postedBy: req.user._id }).sort({ createdAt: -1 });
+    res.status(200).json({ jobs });
+  } catch (err) {
+    res.status(500).json({ message: 'Failed to fetch jobs' });
+  }
+});
+
+// ✅ NEW ENDPOINT: JobPoster Profile Fetch
+app.get('/jobportal/profile', authenticateJobPoster, async (req, res) => {
+  try {
+    const jobPoster = await JobPoster.findById(req.user._id).select('-password');
+    if (!jobPoster) return res.status(404).json({ message: 'Job poster not found' });
+    res.status(200).json({ user: jobPoster });
+  } catch (err) {
+    console.error('Error fetching job poster profile:', err);
+    res.status(500).json({ message: 'Failed to fetch profile' });
+  }
+});
+
+// Generate public URL (add after job posting)
+app.post('/jobportal/generate-public-url/:jobId', authenticateJobPoster, async (req, res) => {
+  try {
+    const job = await JobPost.findById(req.params.jobId);
+    if (!job) return res.status(404).json({ error: 'Job not found' });
+    
+    job.publicId = `job-${uuidv4().split('-')[0]}`;
+    await job.save();
+    
+    res.json({ 
+      publicUrl: `${process.env.FRONTEND_URL}/jobs/${job.publicId}` 
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to generate URL' });
+  }
+});
+// Public JD View Endpoint
+// Public JD View Endpoint
+app.get('/public/view-jd/:jobId', async (req, res) => {
+  try {
+    const job = await JobPost.findById(req.params.jobId);
+    if (!job || !job.jobDescriptionFile) {
+      return res.status(404).json({ error: 'Job description file not found' });
+    }
+
+    const filename = `JobDescription_${job.title.replace(/\s+/g, '_')}${path.extname(job.jobDescriptionFile)}`;
+    const signedUrl = await getSignedUrlForS3(job.jobDescriptionFile);
+    
+    res.status(200).json({ 
+      success: true, 
+      url: signedUrl,
+      filename 
+    });
+  } catch (error) {
+    console.error('Error viewing JD file:', error);
+    res.status(500).json({ error: 'Failed to generate file URL' });
+  }
+});
+
+// HR JD View Endpoint (authenticated)
+app.get('/jobportal/view-jd/:jobId', authenticateJobPoster, async (req, res) => {
+  try {
+    const job = await JobPost.findById(req.params.jobId);
+    if (!job || !job.jobDescriptionFile) {
+      return res.status(404).json({ error: 'Job description file not found' });
+    }
+
+    const filename = `JobDescription_${job.title.replace(/\s+/g, '_')}${path.extname(job.jobDescriptionFile)}`;
+    const signedUrl = await getSignedUrlForS3(job.jobDescriptionFile);
+    
+    res.status(200).json({ 
+      success: true, 
+      url: signedUrl,
+      filename 
+    });
+  } catch (error) {
+    console.error('Error viewing JD file:', error);
+    res.status(500).json({ error: 'Failed to generate file URL' });
+  }
+});
+
+// Resume View Endpoint
+app.get('/jobportal/view-resume/:applicationId', authenticateJobPoster, async (req, res) => {
+  try {
+    const application = await Application.findById(req.params.applicationId);
+    if (!application || !application.resumeFile) {
+      return res.status(404).json({ error: 'Resume not found' });
+    }
+
+    const filename = `Resume_${application.candidateName.replace(/\s+/g, '_')}${path.extname(application.resumeFile)}`;
+    const signedUrl = await getSignedUrlForS3(application.resumeFile);
+    
+    res.status(200).json({ 
+      success: true, 
+      url: signedUrl,
+      filename 
+    });
+  } catch (error) {
+    console.error('Error viewing resume:', error);
+    res.status(500).json({ error: 'Failed to generate resume URL' });
+  }
+});
+const downloadResume = async (applicationId, candidateName) => {
+  try {
+    const res = await axiosInstance.get(`/jobportal/view-resume/${applicationId}`, {
+      headers: { Authorization: `Bearer ${sessionStorage.getItem('jobToken')}` }
+    });
+    
+    if (res.data?.url) {
+      const link = document.createElement('a');
+      link.href = res.data.url;
+      link.download = `${candidateName.replace(/\s+/g, '_')}_Resume${path.extname(res.data.filename)}`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    }
+  } catch (err) {
+    toast.error('Failed to download resume');
+    console.error(err);
+  }
+};
+
+
+
+// Candidate application
+app.post('/public/apply/:jobId', upload.single('resume'), async (req, res) => {
+  try {
+    const job = await JobPost.findById(req.params.jobId);
+    if (!job) return res.status(404).json({ error: 'Job not found' });
+
+    let resumeKey = '';
+    if (req.file) {
+      const fileName = `resume_${Date.now()}_${req.file.originalname}`;
+      resumeKey = `applications/${fileName}`;
+      await uploadToS3(req.file.buffer, resumeKey, req.file.mimetype);
+    }
+
+    const application = await Application.create({
+      jobId: job._id,
+      candidateName: req.body.name,
+      candidateEmail: req.body.email,
+      candidatePhone: req.body.phone,
+      resumeFile: resumeKey
+    });
+
+    job.applications.push(application._id);
+    await job.save();
+
+    // TODO: Send email notification to HR
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Application failed' });
+  }
+});
+
+// Get applications for HR
+app.get('/jobportal/applications/:jobId', authenticateJobPoster, async (req, res) => {
+  try {
+    const applications = await Application.find({ jobId: req.params.jobId });
+    res.json(applications);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch applications' });
+  }
+});
+
+
+// Admin related JobPost detail access 
+// Get all job posters (HR users)
+app.get('/admin/jobposters', authenticateJWT, isAdmin, async (req, res) => {
+  try {
+    const posters = await JobPoster.find({});
+    const postersWithCount = await Promise.all(posters.map(async poster => {
+      const count = await JobPost.countDocuments({ postedBy: poster._id });
+      return { ...poster.toObject(), jobCount: count };
+    }));
+    res.json(postersWithCount);
+  } catch (err) {
+    res.status(500).json({ message: 'Failed to fetch job posters' });
+  }
+});
+
+// Get jobs by HR user (admin version)
+app.get('/jobportal/admin/jobs/:hrId', authenticateJWT, isAdmin, async (req, res) => {
+  try {
+    const jobs = await JobPost.find({ postedBy: req.params.hrId });
+    res.json(jobs);
+  } catch (err) {
+    res.status(500).json({ message: 'Failed to fetch jobs' });
+  }
+});
+
+// Get applications for job (admin version)
+app.get('/jobportal/admin/applications/:jobId', authenticateJWT, isAdmin, async (req, res) => {
+  try {
+    const applications = await Application.find({ jobId: req.params.jobId });
+    res.json(applications);
+  } catch (err) {
+    res.status(500).json({ message: 'Failed to fetch applications' });
+  }
+});
+
+// ==============================
+// ✅ JOB POST SUBMISSION
+// ==============================
+
+
+
+// ==========================
 // Save admin details on startup
 
 // Save admin details on startup with enhanced error handling
