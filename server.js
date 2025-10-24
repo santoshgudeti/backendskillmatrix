@@ -1029,9 +1029,11 @@ app.delete('/api/job-descriptions/:id', authenticateJWT, verifyOwnership(JobDesc
 // ==============================
 // ✅ SCHEDULED TEST PLATFORM APIs
 // ==============================
+// Cancel scheduled test
 
 // 🔥 ENHANCED: Create a new scheduled test with REAL-TIME processing
 app.post('/api/schedule-test', authenticateJWT, upload.fields([{ name: 'resume' }, { name: 'job_description' }]), async (req, res) => {
+  
   const startTime = Date.now();
   console.log('\n🚀 ===== SCHEDULED TEST CREATION STARTED =====');
   console.log('📊 Request Details:', {
@@ -1222,12 +1224,84 @@ app.post('/api/schedule-test', authenticateJWT, upload.fields([{ name: 'resume' 
   }
 });
 
+// Submit or update interview feedback
+app.post('/api/interviews/feedback', authenticateJWT, async (req, res) => {
+  try {
+    const { candidateId, assessmentSessionId, rating, feedback, strengths, areasForImprovement, recommendation } = req.body;
+
+    const sessionId = assessmentSessionId || candidateId;
+    const assessment = await AssessmentSession.findById(sessionId);
+    if (!assessment) {
+      return res.status(404).json({ success: false, error: 'Assessment session not found' });
+    }
+
+    // Upsert interview by assessmentSessionId
+    let interview = await Interview.findOne({ assessmentSessionId: sessionId });
+    if (!interview) {
+      interview = new Interview({
+        candidateId: candidateId || sessionId,
+        assessmentSessionId: sessionId,
+        status: 'completed',
+        createdBy: req.user.id,
+      });
+    }
+
+    interview.status = 'completed';
+    interview.feedback = feedback || interview.feedback;
+    interview.feedbackSummary = feedback || interview.feedbackSummary;
+    interview.rating = typeof rating === 'number' ? rating : interview.rating;
+    interview.updatedAt = new Date();
+
+    // Store structured fields if present
+    interview.structuredFeedback = {
+      strengths: strengths || interview?.structuredFeedback?.strengths,
+      areasForImprovement: areasForImprovement || interview?.structuredFeedback?.areasForImprovement,
+      recommendation: recommendation || interview?.structuredFeedback?.recommendation,
+    };
+
+    await interview.save();
+
+    return res.status(200).json({ success: true, interviewId: interview._id });
+  } catch (error) {
+    console.error('Error saving interview feedback:', error);
+    return res.status(500).json({ success: false, error: 'Failed to save interview feedback' });
+  }
+});
+
+
+app.delete('/api/scheduled-tests/:id', authenticateJWT, async (req, res) => {
+  try {
+    const scheduledTest = await ScheduledTest.findOne({
+      _id: req.params.id,
+      user: req.user.id
+    });
+
+    if (!scheduledTest) {
+      return res.status(404).json({ error: 'Scheduled test not found' });
+    }
+
+    if (scheduledTest.status === 'completed') {
+      return res.status(400).json({ error: 'Cannot cancel completed test' });
+    }
+
+    scheduledTest.status = 'cancelled';
+    await scheduledTest.save();
+
+    res.status(200).json({
+      success: true,
+      message: 'Scheduled test cancelled successfully'
+    });
+
+  } catch (error) {
+    console.error('Error cancelling scheduled test:', error);
+    res.status(500).json({ error: 'Failed to cancel scheduled test' });
+  }
+});
 // Get all scheduled tests for current user
 app.get('/api/scheduled-tests', authenticateJWT, async (req, res) => {
   try {
     const { status, page = 1, limit = 10 } = req.query;
     const skip = (page - 1) * limit;
-
     let query = { user: req.user.id };
     if (status) {
       query.status = status;
@@ -1365,35 +1439,7 @@ app.put('/api/scheduled-tests/:id', authenticateJWT, async (req, res) => {
   }
 });
 
-// Cancel scheduled test
-app.delete('/api/scheduled-tests/:id', authenticateJWT, async (req, res) => {
-  try {
-    const scheduledTest = await ScheduledTest.findOne({
-      _id: req.params.id,
-      user: req.user.id
-    });
 
-    if (!scheduledTest) {
-      return res.status(404).json({ error: 'Scheduled test not found' });
-    }
-
-    if (scheduledTest.status === 'completed') {
-      return res.status(400).json({ error: 'Cannot cancel completed test' });
-    }
-
-    scheduledTest.status = 'cancelled';
-    await scheduledTest.save();
-
-    res.status(200).json({
-      success: true,
-      message: 'Scheduled test cancelled successfully'
-    });
-
-  } catch (error) {
-    console.error('Error cancelling scheduled test:', error);
-    res.status(500).json({ error: 'Failed to cancel scheduled test' });
-  }
-});
 
 // Validate scheduled assessment token
 app.get('/api/validate-scheduled-assessment/:token', async (req, res) => {
