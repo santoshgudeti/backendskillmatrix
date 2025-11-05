@@ -28,6 +28,7 @@ const { exec } = require("child_process");
 const { Upload } = require("@aws-sdk/lib-storage");
 const { Readable } = require('stream');
 const { Blob } = require('buffer');
+const JSZip = require('jszip');
 
 // Add new dependencies at the top
 const PDFDocument = require('pdfkit');
@@ -35,7 +36,8 @@ const Chart = require('chart.js');
 const { createCanvas } = require('canvas');
 const htmlToPdf = require('html-pdf');
 const sendConsentEmail = require('./services/sendConsentMail'); // Or wherever you place it
-
+const { handleAutomaticJobPosting } = require('./services/externalJobPostingService');
+const { MergedDocument, generateMergedPDF, getMergedDocuments } = require('./services/mergedPDFService');
 
 dotenv.config();
 // Initialize Express app
@@ -384,8 +386,8 @@ const InterviewSchema = new mongoose.Schema({
   meetingLink: { type: String },
   status: {
     type: String,
-    enum: ['scheduled', 'completed', 'cancelled'],
-    default: 'scheduled'
+    enum: ['not-scheduled', 'scheduled', 'completed', 'cancelled'],
+    default: 'not-scheduled'
   },
   feedback: { type: String },
   feedbackSummary: { type: String },
@@ -399,10 +401,17 @@ const Interview = mongoose.model('Interview', InterviewSchema);
 
 // Add new CandidateDecision schema
 const CandidateDecisionSchema = new mongoose.Schema({
+  candidateId: { 
+    type: Schema.Types.ObjectId, 
+    ref: 'Candidate'
+  },
+  assessmentSessionId: {
+    type: Schema.Types.ObjectId,
+    ref: 'AssessmentSession'
+  },
   scheduledTest: { 
     type: Schema.Types.ObjectId, 
-    ref: 'ScheduledTest', 
-    required: true 
+    ref: 'ScheduledTest'
   },
   interview: { 
     type: Schema.Types.ObjectId, 
@@ -410,24 +419,48 @@ const CandidateDecisionSchema = new mongoose.Schema({
   },
   decision: {
     type: String,
-    enum: ['selected', 'rejected'],
+    enum: ['selected', 'rejected', 'pending'],
     required: true
   },
+  // For rejected candidates
   rejectionReason: {
     type: String,
-    enum: ['Requirements not matching', 'Location requirement not matching', 'Resume referred for other roles', 'Other']
+    enum: ['requirements-not-matching', 'location-not-suitable', 'resume-referred-other-roles', 'custom']
   },
   customRejectionReason: { type: String },
+  rejectionFeedback: { type: String },
+  // For selected candidates  
+  offerDetails: {
+    position: String,
+    salary: String,
+    startDate: Date,
+    benefits: String,
+    notes: String
+  },
+  // Interview feedback
+  interviewFeedback: {
+    rating: { type: Number, min: 1, max: 5 },
+    feedback: String,
+    strengths: String,
+    areasForImprovement: String,
+    recommendation: {
+      type: String,
+      enum: ['pending', 'proceed', 'reject'],
+      default: 'pending'
+    }
+  },
+  // Status tracking
   offerLetterGenerated: { type: Boolean, default: false },
   rejectionLetterGenerated: { type: Boolean, default: false },
   offerLetterUrl: { type: String },
   rejectionLetterUrl: { type: String },
+  emailSent: { type: Boolean, default: false },
+  emailSentAt: { type: Date },
   decidedBy: { type: Schema.Types.ObjectId, ref: 'User', required: true },
   decidedAt: { type: Date, default: Date.now }
 }, { timestamps: true });
 
 const CandidateDecision = mongoose.model('CandidateDecision', CandidateDecisionSchema);
-
 
 // ==============================
 // ✅ NEW SCHEMAS
@@ -470,8 +503,13 @@ const Application = mongoose.model('Application', applicationSchema);
 
 
 
+// Document Collection Model
+const DocumentCollection = require('./models/DocumentCollection');
+
 // ==============================
-// ✅ JOB PORTAL AUTH ROUTES
+
+// Document Collection Routes
+
 // ==============================
 
 
@@ -548,7 +586,7 @@ function authenticateJobPoster(req, res, next) {
 
 const verifyOwnership = (model) => async (req, res, next) => {
   try {
- const id = req.params.resumeId || req.params.jobDescriptionId || req.params.id;
+ const id = req.params.resumeId || req.params.jobDescriptionId || req.params.sessionId || req.params.id;
 
     console.log(`Verifying ownership for ${model.modelName} ${id}`);
 
@@ -928,6 +966,538 @@ app.get('/api/resumes/:resumeId', authenticateJWT, verifyOwnership(Resume), asyn
     });
   }
 });
+
+// 🔥 NEW: Bulk Resume Download Endpoint
+app.post('/api/resumes/bulk-download', authenticateJWT, async (req, res) => {
+  try {
+    const { resumeIds, candidates } = req.body;
+    
+    console.log('🔥 [BULK DOWNLOAD API] Starting bulk resume download:', {
+      userId: req.user.id,
+      resumeCount: resumeIds?.length || 0,
+      candidateCount: candidates?.length || 0,
+      timestamp: new Date().toISOString()
+    });
+
+    // Validate input
+    if (!resumeIds || !Array.isArray(resumeIds) || resumeIds.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid or empty resume IDs provided'
+      });
+    }
+
+    if (resumeIds.length > 50) {
+      return res.status(400).json({
+        success: false,
+        error: 'Maximum 50 resumes can be downloaded at once'
+      });
+    }
+
+    // Fetch resumes with ownership verification
+    const resumes = await Resume.find({
+      _id: { $in: resumeIds },
+      user: req.user.id // Ensure user owns these resumes
+    });
+
+    console.log('📊 [BULK DOWNLOAD API] Found resumes:', {
+      requested: resumeIds.length,
+      found: resumes.length,
+      missing: resumeIds.length - resumes.length
+    });
+
+    if (resumes.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'No accessible resumes found'
+      });
+    }
+
+    // Create ZIP file
+    const zip = new JSZip();
+    let successCount = 0;
+    let failureCount = 0;
+    const downloadResults = [];
+
+    // Process each resume
+    for (let i = 0; i < resumes.length; i++) {
+      const resume = resumes[i];
+      try {
+        console.log(`📄 [BULK DOWNLOAD API] Processing resume ${i + 1}/${resumes.length}:`, {
+          resumeId: resume._id,
+          filename: resume.filename,
+          s3Key: resume.s3Key
+        });
+
+        // Get file from S3
+        const command = new GetObjectCommand({
+          Bucket: process.env.MINIO_BUCKET_NAME,
+          Key: resume.s3Key
+        });
+        
+        const response = await s3.send(command);
+        const buffer = await streamToBuffer(response.Body);
+        
+        // Find candidate info for better filename
+        const candidateInfo = candidates?.find(c => 
+          c.resumeId === resume._id.toString() || 
+          c.resumeId === resume._id
+        );
+        
+        // Create safe filename
+        const safeName = candidateInfo?.name ? 
+          candidateInfo.name.replace(/[^a-zA-Z0-9]/g, '_') : 
+          `Candidate_${i + 1}`;
+        
+        const fileExt = resume.filename ? 
+          resume.filename.split('.').pop() || 'pdf' : 'pdf';
+        
+        const zipFilename = candidateInfo?.matchingPercentage ? 
+          `${safeName}_${candidateInfo.matchingPercentage}%.${fileExt}` :
+          `${safeName}.${fileExt}`;
+        
+        // Add to ZIP
+        zip.file(zipFilename, buffer);
+        
+        successCount++;
+        downloadResults.push({
+          resumeId: resume._id,
+          filename: resume.filename,
+          zipFilename,
+          success: true,
+          candidateName: candidateInfo?.name || 'Unknown',
+          matchingPercentage: candidateInfo?.matchingPercentage || 0
+        });
+        
+        console.log(`✅ [BULK DOWNLOAD API] Resume added to ZIP: ${zipFilename}`);
+        
+      } catch (error) {
+        console.error(`❌ [BULK DOWNLOAD API] Failed to process resume ${resume._id}:`, error);
+        failureCount++;
+        downloadResults.push({
+          resumeId: resume._id,
+          filename: resume.filename,
+          success: false,
+          error: error.message,
+          candidateName: candidates?.find(c => c.resumeId === resume._id.toString())?.name || 'Unknown'
+        });
+      }
+    }
+
+    if (successCount === 0) {
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to process any resumes',
+        details: downloadResults
+      });
+    }
+
+    // Generate ZIP buffer
+    console.log('📦 [BULK DOWNLOAD API] Generating ZIP file...');
+    const zipBuffer = await zip.generateAsync({ 
+      type: 'nodebuffer',
+      compression: 'DEFLATE',
+      compressionOptions: { level: 6 }
+    });
+    
+    console.log('✅ [BULK DOWNLOAD API] ZIP file generated:', {
+      sizeBytes: zipBuffer.length,
+      sizeMB: (zipBuffer.length / 1024 / 1024).toFixed(2)
+    });
+
+    // Upload ZIP to S3 for download
+    const zipKey = `bulk-downloads/${req.user.id}/${Date.now()}_resumes.zip`;
+    const zipUploadCommand = new PutObjectCommand({
+      Bucket: process.env.MINIO_BUCKET_NAME,
+      Key: zipKey,
+      Body: zipBuffer,
+      ContentType: 'application/zip',
+      ContentDisposition: `attachment; filename="bulk_resumes_${new Date().toISOString().split('T')[0]}.zip"`
+    });
+    
+    await s3.send(zipUploadCommand);
+    
+    // Generate signed download URL
+    const downloadCommand = new GetObjectCommand({
+      Bucket: process.env.MINIO_BUCKET_NAME,
+      Key: zipKey,
+      ResponseContentDisposition: `attachment; filename="bulk_resumes_${new Date().toISOString().split('T')[0]}.zip"`
+    });
+    
+    const downloadUrl = await getSignedUrl(s3, downloadCommand, { expiresIn: 3600 }); // 1 hour
+    
+    console.log('🎉 [BULK DOWNLOAD API] Bulk download completed successfully:', {
+      successCount,
+      failureCount,
+      totalRequested: resumeIds.length,
+      zipSizeMB: (zipBuffer.length / 1024 / 1024).toFixed(2),
+      downloadUrl: downloadUrl.substring(0, 100) + '...'
+    });
+
+    res.json({
+      success: true,
+      downloadUrl,
+      summary: {
+        total: resumeIds.length,
+        successful: successCount,
+        failed: failureCount,
+        zipSizeMB: (zipBuffer.length / 1024 / 1024).toFixed(2)
+      },
+      results: downloadResults
+    });
+
+  } catch (error) {
+    console.error('❌ [BULK DOWNLOAD API] Bulk download failed:', error);
+    
+    let errorMessage = 'Failed to create bulk download';
+    if (error.message.includes('timeout')) {
+      errorMessage = 'Download timeout - too many files or network issues';
+    } else if (error.message.includes('NoSuchKey')) {
+      errorMessage = 'Some resume files are missing from storage';
+    } else if (error.message.includes('AccessDenied')) {
+      errorMessage = 'Access denied to some resume files';
+    }
+    
+    res.status(500).json({
+      success: false,
+      error: errorMessage,
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
+// ===========================
+// MERGED PDF ENDPOINTS
+// ===========================
+
+// Generate merged PDF (resume + report) for a specific assessment session
+app.post('/api/merged-pdf/generate/:sessionId', authenticateJWT, verifyOwnership(AssessmentSession), async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    
+    console.log(`🔄 [MERGED PDF API] Generating merged PDF for session: ${sessionId}`);
+    
+    // Generate merged PDF using the service
+    const result = await generateMergedPDF(sessionId, req.user.id);
+    
+    if (result.success) {
+      // Generate signed URL for download
+      const command = new GetObjectCommand({
+        Bucket: process.env.MINIO_BUCKET_NAME,
+        Key: result.s3Key,
+        ResponseContentDisposition: req.query.download ? `attachment; filename="${result.filename}"` : `inline`
+      });
+      
+      const downloadUrl = await getSignedUrl(s3, command, { expiresIn: 3600 }); // 1 hour
+      
+      console.log(`✅ [MERGED PDF API] Generated merged PDF: ${result.mergedDocumentId}`);
+      
+      res.json({
+        success: true,
+        message: result.existed ? 'Merged PDF already exists' : 'Merged PDF generated successfully',
+        data: {
+          ...result,
+          downloadUrl
+        }
+      });
+    } else {
+      throw new Error('Failed to generate merged PDF');
+    }
+    
+  } catch (error) {
+    console.error(`❌ [MERGED PDF API] Error generating merged PDF for session ${req.params.sessionId}:`, error);
+    
+    let errorMessage = 'Failed to generate merged PDF';
+    if (error.message.includes('Assessment session not found')) {
+      errorMessage = 'Assessment session not found';
+    } else if (error.message.includes('Resume not found')) {
+      errorMessage = 'Resume not available for this session';
+    } else if (error.message.includes('Assessment report not found')) {
+      errorMessage = 'Assessment report not available for this session';
+    }
+    
+    res.status(500).json({
+      success: false,
+      error: errorMessage,
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
+// Get merged documents for a user
+app.get('/api/merged-pdf/list', authenticateJWT, async (req, res) => {
+  try {
+    const { page = 1, limit = 20, status = 'completed' } = req.query;
+    
+    console.log(`📋 [MERGED PDF API] Fetching merged documents for user: ${req.user.id}`);
+    
+    const result = await getMergedDocuments(req.user.id, {
+      page: parseInt(page),
+      limit: parseInt(limit),
+      status
+    });
+    
+    res.json({
+      success: true,
+      data: result.documents,
+      pagination: result.pagination
+    });
+    
+  } catch (error) {
+    console.error(`❌ [MERGED PDF API] Error fetching merged documents:`, error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to fetch merged documents',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
+// Download individual merged PDF
+app.get('/api/merged-pdf/:mergedDocId', authenticateJWT, async (req, res) => {
+  try {
+    const { mergedDocId } = req.params;
+    
+    console.log(`📥 [MERGED PDF API] Downloading merged PDF: ${mergedDocId}`);
+    
+    // Find merged document with ownership verification
+    const mergedDoc = await MergedDocument.findOne({
+      _id: mergedDocId,
+      user: req.user.id
+    });
+    
+    if (!mergedDoc) {
+      return res.status(404).json({
+        success: false,
+        error: 'Merged document not found or access denied'
+      });
+    }
+    
+    if (mergedDoc.status !== 'completed') {
+      return res.status(400).json({
+        success: false,
+        error: `Merged document is not ready (status: ${mergedDoc.status})`
+      });
+    }
+    
+    // Generate signed URL for download
+    const command = new GetObjectCommand({
+      Bucket: process.env.MINIO_BUCKET_NAME,
+      Key: mergedDoc.s3Key,
+      ResponseContentDisposition: req.query.download 
+        ? `attachment; filename="${encodeURIComponent(mergedDoc.filename)}"` 
+        : 'inline'
+    });
+    
+    const url = await getSignedUrl(s3, command, { expiresIn: 3600 }); // 1 hour
+    
+    res.json({
+      success: true,
+      url,
+      filename: mergedDoc.filename,
+      candidateEmail: mergedDoc.candidateEmail,
+      jobTitle: mergedDoc.jobTitle,
+      generatedAt: mergedDoc.generatedAt
+    });
+    
+  } catch (error) {
+    console.error(`❌ [MERGED PDF API] Error downloading merged PDF:`, error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to download merged PDF',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
+// Bulk download merged PDFs
+app.post('/api/merged-pdf/bulk-download', authenticateJWT, async (req, res) => {
+  try {
+    const { assessmentSessionIds, candidates } = req.body;
+    
+    console.log('🔥 [MERGED PDF BULK] Starting bulk merged PDF download:', {
+      userId: req.user.id,
+      sessionCount: assessmentSessionIds?.length || 0,
+      candidateCount: candidates?.length || 0,
+      timestamp: new Date().toISOString()
+    });
+
+    // Validate input
+    if (!assessmentSessionIds || !Array.isArray(assessmentSessionIds) || assessmentSessionIds.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid or empty assessment session IDs provided'
+      });
+    }
+
+    if (assessmentSessionIds.length > 25) {
+      return res.status(400).json({
+        success: false,
+        error: 'Maximum 25 merged documents can be downloaded at once'
+      });
+    }
+
+    // Fetch merged documents with ownership verification using assessment session IDs
+    const mergedDocs = await MergedDocument.find({
+      assessmentSession: { $in: assessmentSessionIds },
+      user: req.user.id,
+      status: 'completed'
+    }).populate('assessmentSession', 'candidateEmail jobTitle completedAt');
+
+    console.log('📊 [MERGED PDF BULK] Found merged documents:', {
+      requested: assessmentSessionIds.length,
+      found: mergedDocs.length,
+      missing: assessmentSessionIds.length - mergedDocs.length
+    });
+
+    if (mergedDocs.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'No accessible merged documents found'
+      });
+    }
+
+    // Create ZIP file
+    const zip = new JSZip();
+    let successCount = 0;
+    let failureCount = 0;
+    const downloadResults = [];
+
+    // Process each merged document
+    for (let i = 0; i < mergedDocs.length; i++) {
+      const mergedDoc = mergedDocs[i];
+      try {
+        console.log(`📄 [MERGED PDF BULK] Processing document ${i + 1}/${mergedDocs.length}:`, {
+          documentId: mergedDoc._id,
+          filename: mergedDoc.filename,
+          s3Key: mergedDoc.s3Key
+        });
+
+        // Get file from S3
+        const command = new GetObjectCommand({
+          Bucket: process.env.MINIO_BUCKET_NAME,
+          Key: mergedDoc.s3Key
+        });
+        
+        const response = await s3.send(command);
+        const buffer = await streamToBuffer(response.Body);
+        
+        // Create safe filename for ZIP
+        const safeName = mergedDoc.candidateEmail ? 
+          mergedDoc.candidateEmail.replace(/[^a-zA-Z0-9@.]/g, '_') : 
+          `Candidate_${i + 1}`;
+        
+        const zipFilename = `${safeName}_merged_${mergedDoc.generatedAt.toISOString().split('T')[0]}.pdf`;
+        
+        // Add to ZIP
+        zip.file(zipFilename, buffer);
+        
+        successCount++;
+        downloadResults.push({
+          documentId: mergedDoc._id,
+          filename: mergedDoc.filename,
+          zipFilename,
+          success: true,
+          candidateEmail: mergedDoc.candidateEmail,
+          jobTitle: mergedDoc.jobTitle
+        });
+        
+        console.log(`✅ [MERGED PDF BULK] Document added to ZIP: ${zipFilename}`);
+        
+      } catch (error) {
+        console.error(`❌ [MERGED PDF BULK] Failed to process document ${mergedDoc._id}:`, error);
+        failureCount++;
+        downloadResults.push({
+          documentId: mergedDoc._id,
+          filename: mergedDoc.filename,
+          success: false,
+          error: error.message,
+          candidateEmail: mergedDoc.candidateEmail
+        });
+      }
+    }
+
+    if (successCount === 0) {
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to process any merged documents',
+        details: downloadResults
+      });
+    }
+
+    // Generate ZIP buffer
+    console.log('📦 [MERGED PDF BULK] Generating ZIP file...');
+    const zipBuffer = await zip.generateAsync({ 
+      type: 'nodebuffer',
+      compression: 'DEFLATE',
+      compressionOptions: { level: 6 }
+    });
+    
+    console.log('✅ [MERGED PDF BULK] ZIP file generated:', {
+      sizeBytes: zipBuffer.length,
+      sizeMB: (zipBuffer.length / 1024 / 1024).toFixed(2)
+    });
+
+    // Upload ZIP to S3 for download
+    const zipKey = `bulk-downloads/${req.user.id}/${Date.now()}_merged_pdfs.zip`;
+    const zipUploadCommand = new PutObjectCommand({
+      Bucket: process.env.MINIO_BUCKET_NAME,
+      Key: zipKey,
+      Body: zipBuffer,
+      ContentType: 'application/zip',
+      ContentDisposition: `attachment; filename="bulk_merged_pdfs_${new Date().toISOString().split('T')[0]}.zip"`
+    });
+    
+    await s3.send(zipUploadCommand);
+    
+    // Generate signed download URL
+    const downloadCommand = new GetObjectCommand({
+      Bucket: process.env.MINIO_BUCKET_NAME,
+      Key: zipKey,
+      ResponseContentDisposition: `attachment; filename="bulk_merged_pdfs_${new Date().toISOString().split('T')[0]}.zip"`
+    });
+    
+    const downloadUrl = await getSignedUrl(s3, downloadCommand, { expiresIn: 3600 }); // 1 hour
+    
+    console.log('🎉 [MERGED PDF BULK] Bulk download completed successfully:', {
+      successCount,
+      failureCount,
+      totalRequested: assessmentSessionIds.length,
+      zipSizeMB: (zipBuffer.length / 1024 / 1024).toFixed(2)
+    });
+
+    res.json({
+      success: true,
+      downloadUrl,
+      summary: {
+        total: assessmentSessionIds.length,
+        successful: successCount,
+        failed: failureCount,
+        zipSizeMB: (zipBuffer.length / 1024 / 1024).toFixed(2)
+      },
+      results: downloadResults
+    });
+
+  } catch (error) {
+    console.error('❌ [MERGED PDF BULK] Bulk download failed:', error);
+    
+    let errorMessage = 'Failed to create bulk merged PDF download';
+    if (error.message.includes('timeout')) {
+      errorMessage = 'Download timeout - too many files or network issues';
+    } else if (error.message.includes('NoSuchKey')) {
+      errorMessage = 'Some merged PDF files are missing from storage';
+    } else if (error.message.includes('AccessDenied')) {
+      errorMessage = 'Access denied to some merged PDF files';
+    }
+    
+    res.status(500).json({
+      success: false,
+      error: errorMessage,
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
 // Add this endpoint right after your JobDescription endpoint
 app.get('/api/job-descriptions/:jobDescriptionId', authenticateJWT, verifyOwnership(JobDescription), async (req, res) => {
 
@@ -1029,11 +1599,9 @@ app.delete('/api/job-descriptions/:id', authenticateJWT, verifyOwnership(JobDesc
 // ==============================
 // ✅ SCHEDULED TEST PLATFORM APIs
 // ==============================
-// Cancel scheduled test
 
 // 🔥 ENHANCED: Create a new scheduled test with REAL-TIME processing
 app.post('/api/schedule-test', authenticateJWT, upload.fields([{ name: 'resume' }, { name: 'job_description' }]), async (req, res) => {
-  
   const startTime = Date.now();
   console.log('\n🚀 ===== SCHEDULED TEST CREATION STARTED =====');
   console.log('📊 Request Details:', {
@@ -1224,84 +1792,12 @@ app.post('/api/schedule-test', authenticateJWT, upload.fields([{ name: 'resume' 
   }
 });
 
-// Submit or update interview feedback
-app.post('/api/interviews/feedback', authenticateJWT, async (req, res) => {
-  try {
-    const { candidateId, assessmentSessionId, rating, feedback, strengths, areasForImprovement, recommendation } = req.body;
-
-    const sessionId = assessmentSessionId || candidateId;
-    const assessment = await AssessmentSession.findById(sessionId);
-    if (!assessment) {
-      return res.status(404).json({ success: false, error: 'Assessment session not found' });
-    }
-
-    // Upsert interview by assessmentSessionId
-    let interview = await Interview.findOne({ assessmentSessionId: sessionId });
-    if (!interview) {
-      interview = new Interview({
-        candidateId: candidateId || sessionId,
-        assessmentSessionId: sessionId,
-        status: 'completed',
-        createdBy: req.user.id,
-      });
-    }
-
-    interview.status = 'completed';
-    interview.feedback = feedback || interview.feedback;
-    interview.feedbackSummary = feedback || interview.feedbackSummary;
-    interview.rating = typeof rating === 'number' ? rating : interview.rating;
-    interview.updatedAt = new Date();
-
-    // Store structured fields if present
-    interview.structuredFeedback = {
-      strengths: strengths || interview?.structuredFeedback?.strengths,
-      areasForImprovement: areasForImprovement || interview?.structuredFeedback?.areasForImprovement,
-      recommendation: recommendation || interview?.structuredFeedback?.recommendation,
-    };
-
-    await interview.save();
-
-    return res.status(200).json({ success: true, interviewId: interview._id });
-  } catch (error) {
-    console.error('Error saving interview feedback:', error);
-    return res.status(500).json({ success: false, error: 'Failed to save interview feedback' });
-  }
-});
-
-
-app.delete('/api/scheduled-tests/:id', authenticateJWT, async (req, res) => {
-  try {
-    const scheduledTest = await ScheduledTest.findOne({
-      _id: req.params.id,
-      user: req.user.id
-    });
-
-    if (!scheduledTest) {
-      return res.status(404).json({ error: 'Scheduled test not found' });
-    }
-
-    if (scheduledTest.status === 'completed') {
-      return res.status(400).json({ error: 'Cannot cancel completed test' });
-    }
-
-    scheduledTest.status = 'cancelled';
-    await scheduledTest.save();
-
-    res.status(200).json({
-      success: true,
-      message: 'Scheduled test cancelled successfully'
-    });
-
-  } catch (error) {
-    console.error('Error cancelling scheduled test:', error);
-    res.status(500).json({ error: 'Failed to cancel scheduled test' });
-  }
-});
 // Get all scheduled tests for current user
 app.get('/api/scheduled-tests', authenticateJWT, async (req, res) => {
   try {
     const { status, page = 1, limit = 10 } = req.query;
     const skip = (page - 1) * limit;
+
     let query = { user: req.user.id };
     if (status) {
       query.status = status;
@@ -1439,7 +1935,35 @@ app.put('/api/scheduled-tests/:id', authenticateJWT, async (req, res) => {
   }
 });
 
+// Cancel scheduled test
+app.delete('/api/scheduled-tests/:id', authenticateJWT, async (req, res) => {
+  try {
+    const scheduledTest = await ScheduledTest.findOne({
+      _id: req.params.id,
+      user: req.user.id
+    });
 
+    if (!scheduledTest) {
+      return res.status(404).json({ error: 'Scheduled test not found' });
+    }
+
+    if (scheduledTest.status === 'completed') {
+      return res.status(400).json({ error: 'Cannot cancel completed test' });
+    }
+
+    scheduledTest.status = 'cancelled';
+    await scheduledTest.save();
+
+    res.status(200).json({
+      success: true,
+      message: 'Scheduled test cancelled successfully'
+    });
+
+  } catch (error) {
+    console.error('Error cancelling scheduled test:', error);
+    res.status(500).json({ error: 'Failed to cancel scheduled test' });
+  }
+});
 
 // Validate scheduled assessment token
 app.get('/api/validate-scheduled-assessment/:token', async (req, res) => {
@@ -1936,6 +2460,195 @@ const getTrialLimit = (type) => {
   };
   return trialLimits[type] || 0;
 };
+
+// 🔥 NEW: JD Validation Endpoint
+app.post('/api/validate-jd', authenticateJWT, upload.single('job_description'), async (req, res) => {
+  try {
+    console.log('📥 JD Validation Request Received:', {
+      userId: req.user?.id,
+      timestamp: new Date().toISOString(),
+      hasFile: !!req.file,
+      fileName: req.file?.originalname,
+      fileSize: req.file?.size,
+      mimeType: req.file?.mimetype
+    });
+
+    // Check if file is provided
+    if (!req.file) {
+      console.log('❌ JD Validation Failed: No file provided');
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Job description file is required.' 
+      });
+    }
+
+    // Check file type (should be PDF)
+    if (req.file.mimetype !== 'application/pdf') {
+      console.log('❌ JD Validation Failed: Invalid file type', {
+        receivedType: req.file.mimetype,
+        expectedType: 'application/pdf'
+      });
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Only PDF files are allowed for job descriptions.' 
+      });
+    }
+
+    // Check file size (25MB limit)
+    if (req.file.size > 25 * 1024 * 1024) {
+      console.log('❌ JD Validation Failed: File too large', {
+        fileSize: req.file.size,
+        maxSize: 25 * 1024 * 1024
+      });
+      return res.status(400).json({ 
+        success: false, 
+        error: 'File size should be less than 25MB.' 
+      });
+    }
+
+    // Log environment variable
+    console.log('🔧 Environment Variables Check:', {
+      jdValidatorUrl: process.env.JD_VALIDATOR,
+      hasJdValidator: !!process.env.JD_VALIDATOR
+    });
+
+    if (!process.env.JD_VALIDATOR) {
+      console.log('❌ JD_VALIDATOR environment variable not set');
+      return res.status(500).json({
+        success: false,
+        error: 'JD validation service not configured'
+      });
+    }
+
+    console.log('🔄 Calling JD Validator API:', {
+      apiUrl: process.env.JD_VALIDATOR,
+      fileName: req.file.originalname,
+      fileSize: req.file.size,
+      mimeType: req.file.mimetype
+    });
+
+    // Call JD Validator API
+    const formData = new FormData();
+    formData.append('job_description', req.file.buffer, {
+      filename: req.file.originalname,
+      contentType: req.file.mimetype
+    });
+    
+    console.log('📦 FormData prepared with job description file');
+
+    console.log('📤 Sending request to JD_VALIDATOR API...');
+    
+    const validatorResponse = await axios.post(
+      process.env.JD_VALIDATOR,
+      formData,
+      { headers: formData.getHeaders() }
+    );
+
+    console.log('📥 Received response from JD_VALIDATOR API:', {
+      status: validatorResponse.status,
+      statusText: validatorResponse.statusText,
+      hasData: !!validatorResponse.data,
+      dataKeys: validatorResponse.data ? Object.keys(validatorResponse.data) : [],
+      // Fixed: Access the correct nested structure with proper null checks
+      isValid: validatorResponse.data?.data?.validation?.isValid,
+      suitabilityScore: validatorResponse.data?.data?.validation?.suitabilityScore,
+      fullDataStructure: process.env.NODE_ENV === 'development' ? validatorResponse.data : 'hidden in production'
+    });
+
+    // Check if the response has the expected structure
+    console.log('🔍 Checking response structure:', {
+      hasData: !!validatorResponse.data,
+      hasSuccess: validatorResponse.data?.success,
+      hasNestedData: !!(validatorResponse.data && validatorResponse.data.data),
+      nestedDataKeys: (validatorResponse.data && validatorResponse.data.data) ? Object.keys(validatorResponse.data.data) : [],
+      fullResponse: process.env.NODE_ENV === 'development' ? validatorResponse.data : 'hidden in production'
+    });
+    
+    if (!validatorResponse.data) {
+      console.log('❌ JD_VALIDATOR API returned no data');
+      return res.status(500).json({
+        success: false,
+        error: 'No data received from JD validation service'
+      });
+    }
+    
+    if (!validatorResponse.data.success) {
+      console.log('❌ JD_VALIDATOR API returned error:', validatorResponse.data);
+      return res.status(500).json({
+        success: false,
+        error: 'Invalid response from JD validation service',
+        details: validatorResponse.data
+      });
+    }
+    
+    if (!validatorResponse.data.data) {
+      console.log('❌ JD_VALIDATOR API returned no validation data:', validatorResponse.data);
+      return res.status(500).json({
+        success: false,
+        error: 'No validation data received from JD validation service',
+        details: validatorResponse.data
+      });
+    }
+
+    // Return validation result with the correct structure
+    const responsePayload = {
+      success: true,
+      data: validatorResponse.data.data // Extract the actual data object
+    };
+    
+    console.log('✅ JD Validation Successful, sending response:', {
+      isValid: responsePayload.data?.validation?.isValid,
+      suitabilityScore: responsePayload.data?.validation?.suitabilityScore,
+      hasValidation: !!(responsePayload.data && responsePayload.data.validation),
+      validationKeys: (responsePayload.data && responsePayload.data.validation) ? Object.keys(responsePayload.data.validation) : []
+    });
+    
+    res.status(200).json(responsePayload);
+  } catch (error) {
+    console.error('❌ JD Validation Error:', {
+      message: error.message,
+      stack: error.stack,
+      code: error.code,
+      responseStatus: error.response?.status,
+      responseStatusText: error.response?.statusText,
+      responseData: error.response?.data
+    });
+    
+    // Handle specific error cases
+    if (error.response) {
+      // The request was made and the server responded with a status code
+      console.log('📡 Error response from JD_VALIDATOR API:', {
+        status: error.response.status,
+        statusText: error.response.statusText,
+        data: error.response.data
+      });
+      
+      return res.status(error.response.status).json({
+        success: false,
+        error: error.response.data?.error || 'JD validation failed',
+        details: process.env.NODE_ENV === 'development' ? error.response.data : undefined
+      });
+    } else if (error.request) {
+      // The request was made but no response was received
+      console.log('⏰ No response received from JD_VALIDATOR API');
+      
+      return res.status(500).json({
+        success: false,
+        error: 'No response from JD validation service'
+      });
+    } else {
+      // Something happened in setting up the request
+      console.log('🔧 Error setting up request to JD_VALIDATOR API');
+      
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to validate job description',
+        details: process.env.NODE_ENV === 'development' ? error.message : undefined
+      });
+    }
+  }
+});
+
 app.post('/api/submit',authenticateJWT,checkSubscription,checkUsageLimits('jdUploads'),checkUsageLimits('resumeUploads'), upload.fields([{ name: 'resumes' }, { name: 'job_description' }]), async (req, res) => {
   let duplicateCount = 0;
   try {
@@ -2058,6 +2771,31 @@ emitApiResponseUpdate(savedResponse);
           'usage.resumeUploads': files.resumes.length
         }
       });
+      
+      // Automatically create job post in external system (non-blocking)
+      if (files.job_description && files.job_description.length > 0) {
+        const jobDescriptionFile = files.job_description[0];
+        // Run in background without blocking the response
+        setImmediate(async () => {
+          try {
+            console.log('🔄 Starting automatic job posting in background...');
+            const jobPostResult = await handleAutomaticJobPosting(
+              jobDescriptionFile.buffer, 
+              jobDescriptionFile.originalname, 
+              req.user.email
+            );
+            
+            if (jobPostResult.success) {
+              console.log(`✅ Automatic job post created: ${jobPostResult.publicUrl}`);
+            } else {
+              console.log(`⚠️ Automatic job post not created: ${jobPostResult.reason || jobPostResult.error}`);
+            }
+          } catch (error) {
+            console.error('❌ Error in automatic job posting background process:', error.message);
+          }
+        });
+      }
+      
     console.log(`Total duplicates found: ${duplicateCount}`); // Log the total number of duplicates
     res.status(200).json({ message: 'Files processed and stored successfully.', results, duplicateCount });
   } catch (error) {
@@ -3189,6 +3927,8 @@ const s3 = new S3Client({
   retryMode: 'standard'
 });
 
+// Make s3 instance globally accessible
+global.s3 = s3;
 
 // Test MinIO connection on startup
 const testMinIOConnection = async () => {
@@ -3599,6 +4339,235 @@ app.post('/api/generate-voice-questions', async (req, res) => {
       success: false,
       error: errorMessage,
       details: process.env.NODE_ENV === 'development' ? errorDetails : undefined
+    });
+  }
+});
+
+// Add this new endpoint after the existing question generation endpoints
+app.post('/api/create-custom-assessment', authenticateJWT, async (req, res) => {
+  try {
+    const { 
+      candidateEmail, 
+      jobTitle, 
+      resumeId, 
+      jobDescriptionId,
+      customMcqQuestions,
+      customVoiceQuestions
+    } = req.body;
+    
+    // Validate input
+    if (!candidateEmail || !jobTitle || !resumeId || !jobDescriptionId) {
+      return res.status(400).json({ 
+        success: false,
+        error: 'All required fields must be provided' 
+      });
+    }
+    
+    // Validate email format
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(candidateEmail)) {
+      return res.status(400).json({ 
+        success: false,
+        error: 'Invalid email format' 
+      });
+    }
+    
+    // Validate custom MCQ questions format
+    if (!customMcqQuestions || !Array.isArray(customMcqQuestions)) {
+      return res.status(400).json({ 
+        success: false,
+        error: 'Custom MCQ questions array is required' 
+      });
+    }
+    
+    // Validate exactly 10 MCQ questions
+    if (customMcqQuestions.length !== 10) {
+      return res.status(400).json({ 
+        success: false,
+        error: 'Exactly 10 MCQ questions are required' 
+      });
+    }
+    
+    // Validate each MCQ question
+    for (let i = 0; i < customMcqQuestions.length; i++) {
+      const q = customMcqQuestions[i];
+      if (!q.question || !q.options || !Array.isArray(q.options) || q.options.length !== 4 || !q.correctAnswer) {
+        return res.status(400).json({ 
+          success: false,
+          error: `Invalid MCQ question format at index ${i}. Each MCQ must have exactly 4 options.` 
+        });
+      }
+    }
+    
+    // Validate custom voice questions format
+    if (!customVoiceQuestions || !Array.isArray(customVoiceQuestions)) {
+      return res.status(400).json({ 
+        success: false,
+        error: 'Custom voice questions array is required' 
+      });
+    }
+    
+    // Validate exactly 5 voice questions
+    if (customVoiceQuestions.length !== 5) {
+      return res.status(400).json({ 
+        success: false,
+        error: 'Exactly 5 voice questions are required' 
+      });
+    }
+    
+    // Validate each voice question
+    for (let i = 0; i < customVoiceQuestions.length; i++) {
+      const q = customVoiceQuestions[i];
+      if (!q.question) {
+        return res.status(400).json({ 
+          success: false,
+          error: `Invalid voice question format at index ${i}` 
+        });
+      }
+    }
+    
+    // Verify resume and JD exist
+    const [resume, jd] = await Promise.all([
+      Resume.findById(resumeId),
+      JobDescription.findById(jobDescriptionId)
+    ]);
+
+    if (!resume || !resume.s3Key) {
+      return res.status(404).json({ error: 'Resume not found in S3' });
+    }
+    if (!jd || !jd.s3Key) {
+      return res.status(404).json({ error: 'Job description not found in S3' });
+    }
+    
+    // Transform custom MCQ questions to match our format
+    const formattedMcqQuestions = customMcqQuestions.map((q, index) => ({
+      id: `cq-${index}-${Date.now()}`,
+      question: q.question,
+      options: q.options,
+      correctAnswer: q.correctAnswer
+    }));
+    
+    // Transform custom voice questions to match our format
+    const formattedVoiceQuestions = customVoiceQuestions.map((q, index) => ({
+      id: `cv-${index}-${Date.now()}`,
+      question: q.question
+    }));
+    
+    // Create session with custom questions
+    const token = require('crypto').randomBytes(20).toString('hex');
+    const testLink = `${process.env.FRONTEND_URL}/assessment/${token}`;
+    
+    const session = new AssessmentSession({
+      user: req.user.id,
+      candidateEmail,
+      jobTitle,
+      testLink,
+      status: 'pending',
+      questions: formattedMcqQuestions,
+      voiceQuestions: formattedVoiceQuestions,
+      resumeId,
+      jobDescriptionId
+    });
+    await session.save();
+    
+    // Increment assessment count
+    await User.findByIdAndUpdate(req.user.id, {
+      $inc: { 'usage.assessments': 1 }
+    });
+    
+    // Email options
+    const mailOptions = {
+      from: `"Assessment System" <${process.env.EMAIL_USER}>`,
+      to: candidateEmail,
+      subject: `Your Custom Assessment for ${jobTitle}`,
+      text: `Please complete your custom assessment at: ${testLink}`,
+      html: `
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <style>
+            body { font-family: Arial, sans-serif; line-height: 1.6; }
+            .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+            .header { background-color: #f8f9fa; padding: 20px; text-align: center; }
+            .content { padding: 20px; }
+            .button { 
+              display: inline-block; 
+              padding: 10px 20px; 
+              background-color: #007bff; 
+              color: white !important; 
+              text-decoration: none; 
+              border-radius: 5px; 
+              margin: 20px 0;
+            }
+            .footer { margin-top: 20px; font-size: 12px; color: #6c757d; }
+          </style>
+        </head>
+        <body>
+          <div class="container">
+            <div class="header">
+              <h2>Custom Assessment Invitation</h2>
+            </div>
+            <div class="content">
+              <p>Hello,</p>
+              <p>You've been invited to complete a custom assessment for the position of <strong>${jobTitle}</strong>.</p>
+              
+              <a href="${testLink}" class="button">Start Custom Assessment</a>
+              
+              <p>Or copy and paste this link into your browser:</p>
+              <p><code>${testLink}</code></p>
+              
+              <p><strong>Note:</strong> This custom assessment includes:</p>
+              <ul>
+                <li>${formattedMcqQuestions.length} Multiple Choice Questions</li>
+                <li>${formattedVoiceQuestions.length} Voice Interview Questions</li>
+                <li>System verification</li>
+                <li>Video interview recording</li>
+              </ul>
+              <p>Your screen and camera will be recorded during the assessment.</p>
+              
+              <p>This link will expire in 24 hours.</p>
+            </div>
+            <div class="footer">
+              <p>If you didn't request this assessment, please ignore this email.</p>
+            </div>
+          </div>
+        </body>
+        </html>
+      `
+    };
+    
+    // Send email
+    try {
+      await transporter.sendMail(mailOptions);
+      console.log(`Custom assessment email sent to ${candidateEmail}`);
+      
+      res.status(200).json({ 
+        success: true,
+        message: 'Custom assessment created and email sent successfully!', 
+        sessionId: session._id,
+        testLink
+      });
+    } catch (emailError) {
+      console.error('Email sending failed:', emailError);
+      
+      // Delete the session if email fails
+      await AssessmentSession.findByIdAndDelete(session._id);
+      await User.findByIdAndUpdate(req.user.id, {
+        $inc: { 'usage.assessments': -1 }
+      });
+      
+      res.status(500).json({ 
+        success: false,
+        error: 'Failed to send assessment email',
+        details: process.env.NODE_ENV === 'development' ? emailError.message : undefined
+      });
+    }
+  } catch (error) {
+    console.error('Error in create-custom-assessment:', error);
+    res.status(500).json({ 
+      success: false,
+      error: 'Failed to create custom assessment',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 });
@@ -4696,6 +5665,29 @@ async function processAssessmentCompletion(sessionId, userId) {
     });
 
     console.log('Successfully processed assessment:', sessionId);
+    
+    // 4. AUTO-GENERATE MERGED PDF
+    // Trigger merged PDF generation automatically after report completion
+    try {
+      console.log(`🔄 [AUTO MERGED PDF] Automatically generating merged PDF for session: ${sessionId}`);
+      
+      // Generate merged PDF in background (don't block the response)
+      generateMergedPDF(sessionId, userId).then((mergedResult) => {
+        if (mergedResult.success) {
+          console.log(`✅ [AUTO MERGED PDF] Successfully generated merged PDF: ${mergedResult.mergedDocumentId}`);
+        } else {
+          console.log(`ℹ️ [AUTO MERGED PDF] Merged PDF already existed: ${mergedResult.mergedDocumentId}`);
+        }
+      }).catch((mergedError) => {
+        console.error(`❌ [AUTO MERGED PDF] Failed to auto-generate merged PDF for session ${sessionId}:`, mergedError.message);
+        // Don't throw - this shouldn't fail the main report process
+      });
+      
+    } catch (autoMergeError) {
+      console.error(`❌ [AUTO MERGED PDF] Error in auto-merge trigger for session ${sessionId}:`, autoMergeError.message);
+      // Don't throw - this shouldn't fail the main report process
+    }
+    
     return report;
   } catch (error) {
     // 4. Handle failures
@@ -6152,6 +7144,213 @@ app.get('/api/debug/scheduled-test/:id', async (req, res) => {
   }
 });
 
+// Update interview status (for external scheduling workflow)
+app.put('/api/interviews/update-status', authenticateJWT, async (req, res) => {
+  try {
+    const { assessmentSessionId, candidateId, status, platform } = req.body;
+    
+    console.log('🔄 Updating interview status:', {
+      assessmentSessionId,
+      candidateId,
+      status,
+      platform,
+      timestamp: new Date().toISOString()
+    });
+    
+    // 🔥 FIX: Find interview by ScheduledTest reference since Interview schema doesn't have assessmentSessionId
+    const sessionId = assessmentSessionId || candidateId;
+    
+    // First find the ScheduledTest for this session
+    const scheduledTest = await ScheduledTest.findOne({ assessmentSession: sessionId });
+    if (!scheduledTest) {
+      console.log('❌ ScheduledTest not found for session:', sessionId);
+      return res.status(404).json({
+        success: false,
+        error: 'No scheduled test found for this assessment session'
+      });
+    }
+    
+    // Find interview by ScheduledTest reference
+    const interview = await Interview.findOne({ scheduledTest: scheduledTest._id });
+    
+    if (!interview) {
+      console.log('❌ Interview not found for ScheduledTest:', scheduledTest._id);
+      return res.status(404).json({
+        success: false,
+        error: 'Interview not found for this assessment session'
+      });
+    }
+    
+    // Update interview status and platform
+    interview.status = status;
+    if (platform) {
+      interview.interviewPlatform = platform;
+    }
+    interview.updatedAt = new Date();
+    
+    await interview.save();
+    
+    console.log('✅ Interview status updated successfully:', {
+      interviewId: interview._id,
+      newStatus: status,
+      platform: interview.interviewPlatform
+    });
+    
+    res.status(200).json({
+      success: true,
+      message: 'Interview status updated successfully',
+      data: interview
+    });
+    
+  } catch (error) {
+    console.error('❌ Error updating interview status:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to update interview status'
+    });
+  }
+});
+
+// Ensure an interview exists for a given assessment session (auto-create minimal records)
+app.post('/api/interviews/ensure-by-session', authenticateJWT, async (req, res) => {
+  try {
+    const { assessmentSessionId, candidateId } = req.body;
+    if (!assessmentSessionId && !candidateId) {
+      return res.status(400).json({ success: false, error: 'assessmentSessionId or candidateId is required' });
+    }
+
+    const sessionId = assessmentSessionId || candidateId;
+    console.log('🔍 Ensuring interview for session:', sessionId);
+
+    const session = await AssessmentSession.findById(sessionId).populate('resumeId');
+    if (!session) {
+      return res.status(404).json({ success: false, error: 'Assessment session not found' });
+    }
+
+    // 🔥 ENHANCED FIX: First check for existing interview by ScheduledTest reference
+    // Since Interview schema doesn't have candidateId/assessmentSessionId, we need to find via ScheduledTest
+    let scheduledTest = await ScheduledTest.findOne({ assessmentSession: sessionId });
+    
+    if (scheduledTest) {
+      // Check if interview already exists for this scheduled test
+      const existingInterview = await Interview.findOne({ scheduledTest: scheduledTest._id });
+      if (existingInterview) {
+        console.log('✅ Found existing interview via ScheduledTest:', existingInterview._id, 'Status:', existingInterview.status);
+        return res.json({ success: true, data: existingInterview, existed: true });
+      }
+    }
+
+    console.log('🔄 No existing interview found, creating new one with schema-compliant approach...');
+
+    const candidateName = session.resumeId?.name || session.candidateEmail || 'Candidate';
+    const candidateEmail = session.candidateEmail;
+    const jobTitle = session.jobTitle || 'Position';
+    const interviewDateTime = new Date();
+    const interviewPlatform = 'Google Calendar';
+    const meetingLink = `https://calendar.google.com/calendar/render?action=TEMPLATE&add=${encodeURIComponent(candidateEmail)}&text=${encodeURIComponent(`Interview - ${jobTitle}`)}`;
+
+    // Create or find ScheduledTest first (required by Interview schema)
+    if (!scheduledTest) {
+      // Use atomic operation to prevent duplicate scheduled tests
+      try {
+        scheduledTest = await ScheduledTest.findOneAndUpdate(
+          { assessmentSession: sessionId }, // Find criteria
+          {
+            candidateName,
+            candidateEmail,
+            jobTitle,
+            status: 'completed',
+            assessmentSession: sessionId,
+            scheduledDateTime: new Date(),
+            expiresAt: new Date(Date.now() + 24*60*60*1000),
+            user: req.user.id,
+            token: `auto-${sessionId}-${Date.now()}`,
+            testLink: `auto-generated-${sessionId}`,
+            resumeId: session.resumeId?._id,
+            jobDescriptionId: session.jobDescriptionId
+          },
+          { 
+            upsert: true, // Create if doesn't exist
+            new: true,    // Return the new document
+            setDefaultsOnInsert: true // Apply defaults on insert
+          }
+        );
+        console.log('📅 Created/found scheduled test with atomic operation:', scheduledTest._id);
+      } catch (scheduledTestError) {
+        console.error('❌ Error creating scheduled test:', scheduledTestError);
+        // If scheduled test creation fails, try to find existing one
+        scheduledTest = await ScheduledTest.findOne({ assessmentSession: sessionId });
+        if (!scheduledTest) {
+          return res.status(500).json({ success: false, error: 'Failed to create required scheduled test' });
+        }
+      }
+    }
+
+    // 🔥 ENHANCED FIX: Use atomic findOneAndUpdate with proper schema fields only
+    try {
+      // Double-check for existing interview after ScheduledTest creation
+      let interview = await Interview.findOne({ scheduledTest: scheduledTest._id });
+      if (interview) {
+        console.log('✅ Found existing interview after ScheduledTest creation:', interview._id);
+        return res.json({ success: true, data: interview, existed: true });
+      }
+
+      // Create interview with schema-compliant fields only
+      interview = await Interview.findOneAndUpdate(
+        {
+          scheduledTest: scheduledTest._id // Use only schema-compliant query
+        },
+        {
+          // Only use fields that exist in InterviewSchema
+          scheduledTest: scheduledTest._id,
+          candidateName,
+          candidateEmail,
+          jobTitle,
+          interviewDateTime,
+          interviewPlatform,
+          meetingLink,
+          scheduledBy: req.user.id,
+          status: 'not-scheduled', // 🔥 FIX: Start with 'not-scheduled' status
+          createdAt: new Date(),
+          updatedAt: new Date()
+        },
+        {
+          upsert: true, // Create if doesn't exist
+          new: true,    // Return the new document
+          setDefaultsOnInsert: true // Apply defaults on insert
+        }
+      );
+      
+      const isNewInterview = !interview.createdAt || (new Date() - interview.createdAt) < 1000;
+      console.log(isNewInterview ? '✅ Created new interview with atomic operation:' : '✅ Found existing interview during atomic operation:', interview._id, 'Status:', interview.status);
+
+      return res.status(isNewInterview ? 201 : 200).json({ 
+        success: true, 
+        data: interview, 
+        created: isNewInterview,
+        existed: !isNewInterview 
+      });
+      
+    } catch (interviewError) {
+      console.error('❌ Error in atomic interview creation:', interviewError);
+      
+      // Final fallback: try to find any existing interview by ScheduledTest
+      const existingInterview = await Interview.findOne({ scheduledTest: scheduledTest._id });
+      
+      if (existingInterview) {
+        console.log('🔄 Fallback: Found existing interview after error:', existingInterview._id);
+        return res.json({ success: true, data: existingInterview, existed: true });
+      }
+      
+      throw interviewError; // Re-throw if no existing interview found
+    }
+
+  } catch (error) {
+    console.error('❌ Error ensuring interview:', error);
+    return res.status(500).json({ success: false, error: 'Failed to ensure interview' });
+  }
+});
+
 // Force activation of a specific test
 app.post('/api/debug/activate-test/:id', async (req, res) => {
   try {
@@ -6348,6 +7547,77 @@ app.get('/api/interviews/scheduled-test/:scheduledTestId', authenticateJWT, asyn
     });
   }
 });
+
+// Submit interview feedback
+app.post('/api/interviews/feedback', authenticateJWT, async (req, res) => {
+  try {
+    const { candidateId, assessmentSessionId, rating, feedback, strengths, areasForImprovement, recommendation } = req.body;
+    
+    // Validate required fields
+    if (!candidateId || !assessmentSessionId || !rating || !feedback) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Candidate ID, assessment session ID, rating, and feedback are required' 
+      });
+    }
+    
+    // 🔥 FIX: Find interview by ScheduledTest reference since Interview schema doesn't have assessmentSessionId
+    const sessionId = assessmentSessionId || candidateId;
+    
+    // First find the ScheduledTest for this session
+    const scheduledTest = await ScheduledTest.findOne({ assessmentSession: sessionId });
+    if (!scheduledTest) {
+      return res.status(400).json({
+        success: false,
+        error: 'No scheduled test found for this assessment session. Please schedule an interview before submitting feedback.'
+      });
+    }
+    
+    // Find interview by ScheduledTest reference
+    let interview = await Interview.findOne({ scheduledTest: scheduledTest._id });
+    if (!interview) {
+      return res.status(400).json({
+        success: false,
+        error: 'No interview found for this assessment session. Please schedule an interview before submitting feedback.'
+      });
+    }
+    
+    // Update interview with feedback
+    interview.feedback = feedback;
+    interview.rating = rating;
+    interview.status = 'completed';
+    interview.feedbackSubmittedAt = new Date();
+    interview.updatedAt = new Date();
+    
+    // Add additional feedback fields
+    interview.feedbackDetails = {
+      strengths,
+      areasForImprovement,
+      recommendation
+    };
+    
+    await interview.save();
+    
+    res.status(200).json({
+      success: true,
+      message: 'Interview feedback submitted successfully',
+      data: interview
+    });
+    
+  } catch (error) {
+    console.error('Error submitting interview feedback:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to submit interview feedback' 
+    });
+  }
+});
+
+// ==============================
+// ✅ OFFER LETTER FUNCTIONALITY
+// ==============================
+
+const { sendSelectionEmail, generateOfferLetter, sendOfferLetter, getRequiredDocuments } = require('./services/offerLetterService');
 
 // Update interview feedback and status
 app.put('/api/interviews/:id', authenticateJWT, async (req, res) => {
@@ -6997,9 +8267,1168 @@ app.post('/api/rejection-report/send', authenticateJWT, async (req, res) => {
   }
 });
 
+// Submit or update interview feedback
+app.post('/api/interviews/feedback', authenticateJWT, async (req, res) => {
+  try {
+    const { candidateId, assessmentSessionId, rating, feedback, strengths, areasForImprovement, recommendation } = req.body;
+
+    const sessionId = assessmentSessionId || candidateId;
+    const assessment = await AssessmentSession.findById(sessionId);
+    if (!assessment) {
+      return res.status(404).json({ success: false, error: 'Assessment session not found' });
+    }
+
+    // Upsert interview by assessmentSessionId
+    let interview = await Interview.findOne({ assessmentSessionId: sessionId });
+    if (!interview) {
+      interview = new Interview({
+        candidateId: candidateId || sessionId,
+        assessmentSessionId: sessionId,
+        status: 'completed',
+        createdBy: req.user.id,
+      });
+    }
+
+    interview.status = 'completed';
+    interview.feedback = feedback || interview.feedback;
+    interview.feedbackSummary = feedback || interview.feedbackSummary;
+    interview.rating = typeof rating === 'number' ? rating : interview.rating;
+    interview.updatedAt = new Date();
+
+    // Store structured fields if present
+    interview.structuredFeedback = {
+      strengths: strengths || interview?.structuredFeedback?.strengths,
+      areasForImprovement: areasForImprovement || interview?.structuredFeedback?.areasForImprovement,
+      recommendation: recommendation || interview?.structuredFeedback?.recommendation,
+    };
+
+    await interview.save();
+
+    return res.status(200).json({ success: true, interviewId: interview._id });
+  } catch (error) {
+    console.error('Error saving interview feedback:', error);
+    return res.status(500).json({ success: false, error: 'Failed to save interview feedback' });
+  }
+});
+
 // ==============================
 // ✅ END DEBUG ENDPOINTS
 // ==============================
+
+// ==============================
+// INTERVIEW WORKFLOW ENDPOINTS
+// ==============================
+
+// Get candidate details for interview workflow
+app.get('/api/candidates/:candidateId/details', authenticateJWT, async (req, res) => {
+  try {
+    const { candidateId } = req.params;
+    const { assessmentSessionId } = req.query;
+    
+    console.log('Fetching candidate details for:', { candidateId, assessmentSessionId });
+    
+    // Get assessment session data (since candidateId is actually the assessment session ID)
+    const assessment = await AssessmentSession.findById(assessmentSessionId || candidateId)
+      .populate('resumeId')
+      .populate('jobDescriptionId')
+      .populate('testResult');
+    
+    if (!assessment) {
+      return res.status(404).json({
+        success: false,
+        error: 'Assessment session not found'
+      });
+    }
+    
+    // Create candidate data from assessment with enhanced name parsing
+    const candidate = {
+      _id: assessment._id,
+      name: (() => {
+        // Enhanced name parsing logic - consistent with frontend
+        let displayName = 'Unknown Candidate';
+        
+        // Priority: 1. Check if resumeId.name exists and is not an email
+        if (assessment.resumeId?.name && typeof assessment.resumeId.name === 'string' && assessment.resumeId.name.trim()) {
+          const nameValue = assessment.resumeId.name.trim();
+          // If name is not in email format, use it directly
+          if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(nameValue)) {
+            displayName = nameValue;
+          } else {
+            // If name field contains email, parse it for display
+            const emailParts = nameValue.split('@')[0].replace(/[._-]/g, ' ');
+            const prettyName = emailParts
+              .split(' ')
+              .filter(Boolean)
+              .map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+              .join(' ')
+              .trim();
+            displayName = prettyName || 'Candidate';
+          }
+        }
+        // Priority: 2. If no proper name, use candidateEmail for parsing
+        else if (assessment.candidateEmail && typeof assessment.candidateEmail === 'string' && assessment.candidateEmail.includes('@')) {
+          const emailParts = assessment.candidateEmail.split('@')[0].replace(/[._-]/g, ' ');
+          const prettyName = emailParts
+            .split(' ')
+            .filter(Boolean)
+            .map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+            .join(' ')
+            .trim();
+          displayName = prettyName || 'Candidate';
+        }
+        
+        return displayName;
+      })(),
+      email: assessment.candidateEmail,
+      mobile_number: assessment.resumeId?.mobile_number,
+      experience: assessment.resumeId?.experience || assessment.resumeId?.total_experience,
+      skills: assessment.resumeId?.skills || [],
+      resume: assessment.resumeId
+    };
+    
+    res.status(200).json({
+      success: true,
+      candidate,
+      assessment
+    });
+    
+  } catch (error) {
+    console.error('Error fetching candidate details:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to fetch candidate details'
+    });
+  }
+});
+
+// Schedule interview
+app.post('/api/interviews/schedule', authenticateJWT, async (req, res) => {
+  try {
+    const { candidateId, assessmentSessionId, platform, date, time, duration, notes } = req.body;
+    
+    // Create interview record
+    const interview = new Interview({
+      candidateId,
+      assessmentSessionId,
+      platform,
+      scheduledDate: new Date(`${date}T${time}:00`),
+      duration,
+      notes,
+      status: 'scheduled',
+      createdBy: req.user.id,
+      createdAt: new Date()
+    });
+    
+    await interview.save();
+    
+    // Get assessment session data
+    const assessment = await AssessmentSession.findById(assessmentSessionId || candidateId)
+      .populate('resumeId');
+    
+    if (!assessment) {
+      return res.status(404).json({
+        success: false,
+        error: 'Assessment session not found'
+      });
+    }
+    
+    // Create candidate data from assessment with consistent name parsing
+    const candidate = {
+      _id: assessment._id,
+      name: (() => {
+        // Enhanced name parsing logic - consistent with other endpoints
+        let displayName = 'Unknown Candidate';
+        
+        // Priority: 1. Check if resumeId.name exists and is not an email
+        if (assessment.resumeId?.name && typeof assessment.resumeId.name === 'string' && assessment.resumeId.name.trim()) {
+          const nameValue = assessment.resumeId.name.trim();
+          // If name is not in email format, use it directly
+          if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(nameValue)) {
+            displayName = nameValue;
+          } else {
+            // If name field contains email, parse it for display
+            const emailParts = nameValue.split('@')[0].replace(/[._-]/g, ' ');
+            const prettyName = emailParts
+              .split(' ')
+              .filter(Boolean)
+              .map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+              .join(' ')
+              .trim();
+            displayName = prettyName || 'Candidate';
+          }
+        }
+        // Priority: 2. If no proper name, use candidateEmail for parsing
+        else if (assessment.candidateEmail && typeof assessment.candidateEmail === 'string' && assessment.candidateEmail.includes('@')) {
+          const emailParts = assessment.candidateEmail.split('@')[0].replace(/[._-]/g, ' ');
+          const prettyName = emailParts
+            .split(' ')
+            .filter(Boolean)
+            .map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+            .join(' ')
+            .trim();
+          displayName = prettyName || 'Candidate';
+        }
+        
+        return displayName;
+      })(),
+      email: assessment.candidateEmail
+    };
+
+    // Send interview invite
+    const { sendInterviewInvite } = require('./services/interviewService');
+    await sendInterviewInvite({
+      candidateEmail: candidate.email,
+      candidateName: candidate.name,
+      platform,
+      date,
+      time,
+      duration,
+      notes,
+      jobTitle: assessment?.jobTitle || 'Position'
+    });
+    
+    res.status(200).json({
+      success: true,
+      interviewId: interview._id,
+      message: 'Interview scheduled successfully'
+    });
+    
+  } catch (error) {
+    console.error('Error scheduling interview:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to schedule interview'
+    });
+  }
+});
+
+app.post('/api/candidates/select', authenticateJWT, async (req, res) => {
+  try {
+    const { candidateId, assessmentSessionId, offerData, offerHtml, interviewFeedback } = req.body;
+    // Validate required fields to prevent sending without details
+    if (!offerData || !offerData.position || !offerData.salary || !offerData.startDate) {
+      return res.status(400).json({
+        success: false,
+        error: 'Position, salary, and start date are required to generate an offer letter.'
+      });
+    }
+    
+    // Get assessment session data
+    const assessment = await AssessmentSession.findById(assessmentSessionId || candidateId)
+      .populate('resumeId')
+      .populate('jobDescriptionId');
+    
+    if (!assessment) {
+      return res.status(404).json({
+        success: false,
+        error: 'Assessment session not found'
+      });
+    }
+    
+    // Get user data for company info
+    const user = await User.findById(req.user.id);
+    
+    // Create candidate data from assessment
+    const candidate = {
+      _id: assessment._id, // Use assessment session ID as candidate ID
+      name: assessment.resumeId?.name || assessment.candidateEmail?.split('@')[0]?.replace(/[._-]/g, ' ') || 'Candidate',
+      email: assessment.candidateEmail
+    };
+    
+    // Generate PDF either from provided HTML (preferred) or from professional template
+    let pdfBuffer;
+    if (offerHtml && offerHtml.trim()) {
+      // Use html-pdf (already installed) to render HTML to PDF
+      pdfBuffer = await new Promise((resolve, reject) => {
+        htmlToPdf.create(offerHtml, { format: 'A4', border: '10mm' }).toBuffer((err, buffer) => {
+          if (err) return reject(err);
+          resolve(buffer);
+        });
+      });
+    } else {
+      pdfBuffer = await generateProfessionalOfferLetter({
+        candidateName: candidate.name,
+        candidateEmail: candidate.email,
+        position: offerData.position || assessment.jobTitle,
+        salary: offerData.salary,
+        startDate: offerData.startDate,
+        benefits: offerData.benefits,
+        notes: offerData.notes,
+        companyName: user.companyName,
+        hrName: user.fullName,
+        hrEmail: user.email,
+        assessmentScore: assessment.testResult?.combinedScore || 'N/A',
+        interviewRating: interviewFeedback?.rating || 'N/A'
+      });
+    }
+
+    // Upload the resulting PDF to S3
+    const fileName = `offer_letter_${(candidate.name || candidate.email).replace(/\s+/g, '_')}_${Date.now()}.pdf`;
+    const s3Key = `offer-letters/${fileName}`;
+    await uploadToS3(pdfBuffer, s3Key, 'application/pdf');
+    const command = new GetObjectCommand({
+      Bucket: process.env.MINIO_BUCKET_NAME,
+      Key: s3Key
+    });
+    const offerLetterUrl = await getSignedUrl(s3, command, { expiresIn: 604800 });
+    // Send offer letter email to candidate
+    const candidateEmail = candidate.email || assessment.candidateEmail || offerData?.candidateEmail;
+    if (!candidateEmail) {
+      console.warn('No candidate email available to send offer letter');
+      return res.status(400).json({ success: false, error: 'Candidate email is missing. Please add email and try again.' });
+    }
+    try {
+      const { sendOfferLetter } = require('./services/interviewService');
+      console.log(`[MAIL] Preparing candidate offer send to ${candidateEmail}`);
+      await sendOfferLetter({
+        candidateName: candidate.name,
+        candidateEmail,
+        position: offerData.position || assessment.jobTitle,
+        salary: offerData.salary,
+        startDate: offerData.startDate,
+        companyName: offerData?.companyName || user.companyName
+      }, offerLetterUrl); 
+    } catch (e) {
+      console.warn('Failed to send Candidate offer letter:', e?.message);
+    }
+    // Also send a copy to HR using rich summary template
+    try {
+      const { sendOfferLetterToHR } = require('./services/interviewService');
+      await sendOfferLetterToHR({
+        hrEmail: user.email,
+        companyName: offerData?.companyName || user.companyName,
+        candidateName: candidate.name,
+        position: offerData.position || assessment.jobTitle,
+        salary: offerData.salary,
+        startDate: offerData.startDate,
+        assessmentScore: assessment.testResult?.combinedScore || 'N/A',
+        interviewRating: interviewFeedback?.rating || 'N/A'
+      }, offerLetterUrl); 
+    } catch (e) {
+      console.warn('Failed to send HR copy of offer letter:', e?.message);
+    }
+    
+    // Resolve or create ScheduledTest to satisfy schema
+    let scheduledTestDoc = await ScheduledTest.findOne({ assessmentSession: assessment._id });
+    if (!scheduledTestDoc) {
+      scheduledTestDoc = new ScheduledTest({
+        candidateName: candidate.name || assessment.resumeId?.name || 'Candidate',
+        candidateEmail: candidate.email || assessment.candidateEmail,
+        jobTitle: offerData.position || assessment.jobTitle || 'Position',
+        status: 'completed',
+        assessmentSession: assessment._id,
+        scheduledDateTime: new Date(),
+        expiresAt: new Date(Date.now() + 24*60*60*1000),
+        user: req.user.id,
+        // Required fields for ScheduledTest schema
+        token: `${String(assessment._id)}-${Date.now()}`,
+        testLink: `${process.env.PUBLIC_WEB_BASE_URL || 'https://app.skillmatrix.local'}/assessment/test/${String(assessment._id)}-${Date.now()}`,
+        jobDescriptionId: assessment.jobDescriptionId ? assessment.jobDescriptionId._id || assessment.jobDescriptionId : undefined,
+        resumeId: assessment.resumeId ? assessment.resumeId._id || assessment.resumeId : undefined
+      });
+      await scheduledTestDoc.save();
+    }
+
+    // Create candidate decision record
+    const candidateDecision = new CandidateDecision({
+      scheduledTest: scheduledTestDoc._id,
+      candidateId,
+      assessmentSessionId,
+      decision: 'selected',
+      offerLetterUrl: s3Key,
+      offerDetails: offerData,
+      interviewFeedback: interviewFeedback,
+      decidedBy: req.user.id,
+      decidedAt: new Date()
+    });
+    
+    await candidateDecision.save();
+    
+    res.status(200).json({
+      success: true,
+      message: 'Candidate selected successfully. Offer letter generated and sent.',
+      data: candidateDecision
+    });
+    
+  } catch (error) {
+    console.error('Error selecting candidate:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to select candidate'
+    });
+  }
+});
+
+// Generate Offer Draft (auto-filled HTML from template)
+app.post('/api/offers/draft', authenticateJWT, async (req, res) => {
+  try {
+    const { candidateId, assessmentSessionId, template, offerData } = req.body;
+    const assessment = await AssessmentSession.findById(assessmentSessionId || candidateId)
+      .populate('resumeId');
+    if (!assessment) {
+      return res.status(404).json({ success: false, error: 'Assessment session not found' });
+    }
+
+    // Load offer letter templates
+    const { getOfferLetterTemplate, generateProfessionalTemplate, generateExecutiveTemplate, generateStartupTemplate, generateFormalTemplate } = require('./services/offerLetterService');
+    
+    // Define templates object
+    const templates = {
+      professional: generateProfessionalTemplate,
+      executive: generateExecutiveTemplate,
+      startup: generateStartupTemplate,
+      formal: generateFormalTemplate
+    };
+
+    const user = await User.findById(req.user.id);
+    const candidateName = offerData?.candidateName || assessment.resumeId?.name || assessment.candidateEmail || 'Candidate';
+    const jobTitle = offerData?.position || assessment.jobTitle || 'Position';
+    const companyName = offerData?.companyName || user?.companyName || 'Your Company';
+    const today = new Date().toLocaleDateString();
+
+    const offerTemplate = templates[template];
+    if (!offerTemplate) {
+      return res.status(400).json({ success: false, error: 'Invalid template' });
+    }
+
+    const offerHtml = offerTemplate({
+      candidateName,
+      jobTitle,
+      companyName,
+      today,
+      position: offerData.position,
+      salary: offerData.salary,
+      startDate: offerData.startDate,
+      benefits: offerData.benefits,
+      notes: offerData.notes,
+      hrName: user.fullName,
+      hrEmail: user.email
+    });
+
+    res.status(200).json({
+      success: true,
+      offerHtml
+    });
+
+  } catch (error) {
+    console.error('Error generating offer draft:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to generate offer draft'
+    });
+  }
+});
+
+// Document Collection Endpoints
+app.post('/api/candidates/:candidateId/request-documents', authenticateJWT, async (req, res) => {
+  try {
+    const { candidateId } = req.params;
+    const { assessmentSessionId, documentTypes, customMessage, template } = req.body;
+    
+    // Get assessment session data
+    const assessment = await AssessmentSession.findById(assessmentSessionId || candidateId)
+      .populate('resumeId');
+    
+    if (!assessment) {
+      return res.status(404).json({
+        success: false,
+        error: 'Assessment session not found'
+      });
+    }
+    
+    // Get user data for company info
+    const user = await User.findById(req.user.id);
+    
+    // Create candidate data from assessment
+    const candidate = {
+      name: assessment.resumeId?.name || assessment.candidateEmail,
+      email: assessment.candidateEmail
+    };
+    
+    // Send document collection email to candidate
+    const { sendDocumentCollectionEmail } = require('./services/interviewService');
+    
+    await sendDocumentCollectionEmail({
+      candidateName: candidate.name,
+      candidateEmail: candidate.email,
+      companyName: user.companyName,
+      documentTypes,
+      customMessage,
+      template,
+      templateId: template, // If template is a string ID, use it
+      userId: req.user.id
+    });
+    
+    // If template is a user-defined template ID, validate it
+    let templateToUse = template;
+    if (template && !['standard', 'formal', 'friendly'].includes(template)) {
+      // This is likely a user-defined template ID
+      try {
+        const { getTemplateById } = require('./services/documentTemplateService');
+        const userTemplate = await getTemplateById(template, req.user.id);
+        if (!userTemplate) {
+          templateToUse = 'standard'; // Fallback to standard if template not found
+        }
+      } catch (error) {
+        console.error('Error validating user template:', error);
+        templateToUse = 'standard'; // Fallback to standard if validation fails
+      }
+    }
+    
+    // Create document collection record
+    const documentCollection = new DocumentCollection({
+      candidateId,
+      assessmentSessionId,
+      requestedBy: req.user.id,
+      documentTypes,
+      customMessage,
+      template: templateToUse,
+      status: 'requested',
+      requestedAt: new Date()
+    });
+    
+    await documentCollection.save();
+    
+    res.status(200).json({
+      success: true,
+      message: 'Document collection request sent successfully',
+      data: documentCollection
+    });
+    
+  } catch (error) {
+    console.error('Error requesting documents:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to request documents'
+    });
+  }
+});
+
+// Get user templates for document collection
+app.get('/api/document-collection/templates', authenticateJWT, async (req, res) => {
+  try {
+    const { getUserTemplates } = require('./services/documentTemplateService');
+    const templates = await getUserTemplates(req.user.id);
+    
+    res.status(200).json({
+      success: true,
+      data: templates
+    });
+  } catch (error) {
+    console.error('Error fetching templates:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to fetch templates'
+    });
+  }
+});
+
+// Create a new document collection template
+app.post('/api/document-collection/templates', authenticateJWT, async (req, res) => {
+  try {
+    const { createTemplate } = require('./services/documentTemplateService');
+    const templateData = req.body;
+    
+    // Add user ID to template data
+    templateData.userId = req.user.id;
+    
+    const template = await createTemplate(templateData);
+    
+    res.status(201).json({
+      success: true,
+      message: 'Template created successfully',
+      data: template
+    });
+  } catch (error) {
+    console.error('Error creating template:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to create template'
+    });
+  }
+});
+
+// Update a document collection template
+app.put('/api/document-collection/templates/:templateId', authenticateJWT, async (req, res) => {
+  try {
+    const { updateTemplate } = require('./services/documentTemplateService');
+    const { templateId } = req.params;
+    const templateData = req.body;
+    
+    const template = await updateTemplate(templateId, templateData, req.user.id);
+    
+    if (!template) {
+      return res.status(404).json({
+        success: false,
+        error: 'Template not found'
+      });
+    }
+    
+    res.status(200).json({
+      success: true,
+      message: 'Template updated successfully',
+      data: template
+    });
+  } catch (error) {
+    console.error('Error updating template:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to update template'
+    });
+  }
+});
+
+// Delete a document collection template
+app.delete('/api/document-collection/templates/:templateId', authenticateJWT, async (req, res) => {
+  try {
+    const { deleteTemplate } = require('./services/documentTemplateService');
+    const { templateId } = req.params;
+    
+    const result = await deleteTemplate(templateId, req.user.id);
+    
+    if (!result) {
+      return res.status(404).json({
+        success: false,
+        error: 'Template not found'
+      });
+    }
+    
+    res.status(200).json({
+      success: true,
+      message: 'Template deleted successfully'
+    });
+  } catch (error) {
+    console.error('Error deleting template:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to delete template'
+    });
+  }
+});
+
+// Endpoint to upload documents
+app.post('/api/candidates/:candidateId/upload-documents', authenticateJWT, upload.array('documents'), async (req, res) => {
+  try {
+    const { candidateId } = req.params;
+    const { documentCollectionId } = req.body;
+    const files = req.files;
+    
+    if (!files || files.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'No documents uploaded'
+      });
+    }
+    
+    // Upload documents to S3
+    const uploadedDocuments = [];
+    for (const file of files) {
+      const s3Key = `candidate-documents/${candidateId}/${Date.now()}_${file.originalname}`;
+      await uploadToS3(file.buffer, s3Key, file.mimetype);
+      
+      uploadedDocuments.push({
+        name: file.originalname,
+        s3Key,
+        type: file.mimetype,
+        size: file.size,
+        uploadedAt: new Date()
+      });
+    }
+    
+    // Update document collection record
+    const documentCollection = await DocumentCollection.findById(documentCollectionId);
+    if (documentCollection) {
+      documentCollection.documents = uploadedDocuments;
+      documentCollection.status = 'uploaded';
+      documentCollection.uploadedAt = new Date();
+      await documentCollection.save();
+    }
+    
+    res.status(200).json({
+      success: true,
+      message: 'Documents uploaded successfully',
+      data: {
+        documentCollectionId,
+        documents: uploadedDocuments
+      }
+    });
+    
+  } catch (error) {
+    console.error('Error uploading documents:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to upload documents'
+    });
+  }
+});
+
+// Endpoint to get document collection status
+app.get('/api/candidates/:candidateId/document-collection/:documentCollectionId', authenticateJWT, async (req, res) => {
+  try {
+    const { candidateId, documentCollectionId } = req.params;
+    
+    const documentCollection = await DocumentCollection.findById(documentCollectionId);
+    if (!documentCollection) {
+      return res.status(404).json({
+        success: false,
+        error: 'Document collection not found'
+      });
+    }
+    
+    res.status(200).json({
+      success: true,
+      data: documentCollection
+    });
+    
+  } catch (error) {
+    console.error('Error fetching document collection:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to fetch document collection'
+    });
+  }
+});
+
+
+
+
+// Finalize edited HTML -> PDF + email (optional alternative to /api/candidates/select)
+app.post('/api/offers/finalize', authenticateJWT, async (req, res) => {
+  try {
+    const { candidateId, assessmentSessionId, editedHtml, offerData } = req.body;
+    if (!editedHtml) {
+      return res.status(400).json({ success: false, error: 'editedHtml is required' });
+    }
+
+    const assessment = await AssessmentSession.findById(assessmentSessionId || candidateId)
+      .populate('resumeId');
+    if (!assessment) {
+      return res.status(404).json({ success: false, error: 'Assessment session not found' });
+    }
+    const user = await User.findById(req.user.id);
+    const candidateName = assessment.resumeId?.name || assessment.candidateEmail || 'Candidate';
+
+    // naive sanitization (replace with sanitize-html in production)
+    const safeHtml = String(editedHtml).replace(/<script[\s\S]*?<\/script>/gi, '');
+    
+    // Helpers to format values and fill placeholders
+    const formatDate = (dateStr) => {
+      if (!dateStr) return '';
+      try {
+        return new Date(dateStr).toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' });
+      } catch {
+        return String(dateStr);
+      }
+    };
+    
+    const formatSalary = (amount, currency = (offerData?.currency || 'INR')) => {
+      if (amount === undefined || amount === null || amount === '') return '';
+      const n = Number(amount);
+      const formatted = isNaN(n) ? String(amount) : n.toLocaleString('en-IN');
+      const symbol = currency === 'INR' ? '₹' : (currency === 'USD' ? '$' : currency);
+      return `${symbol}${formatted}`;
+    };
+    
+    const buildCandidateFullBlock = () => {
+      const parts = [
+        candidateName,
+        offerData?.candidateEmail,
+        offerData?.candidateAddress
+      ].filter(Boolean);
+      return parts.join('<br/>');
+    };
+    
+    const buildSalarySection = () => {
+      const salaryFmt = formatSalary(offerData?.salary);
+      return {
+        earningsRows: '',        // optional: generate rows if you have breakdown
+        deductionsRows: '',      // optional: generate rows if you have breakdown
+        totalEarnings: salaryFmt,
+        totalDeductions: '0',
+        netSalary: salaryFmt,
+        annualTakeHome: salaryFmt,
+        salaryInWords: ''        // optional: add number-to-words later
+      };
+    };
+    
+    const fillTemplate = (html, map) =>
+      Object.entries(map).reduce((acc, [k, v]) => acc.replace(new RegExp(`\\{{2}${k}\\}{2}`, 'g'), v ?? ''), html);
+
+    // Reuse the same helpers here (formatDate, formatSalary, buildCandidateFullBlock, buildSalarySection, fillTemplate)
+    const filledHtml = fillTemplate(safeHtml, {
+      candidateFullBlock: (() => {
+        const parts = [
+          (offerData?.candidateName || candidateName),
+          offerData?.candidateEmail,
+          offerData?.candidateAddress
+        ].filter(Boolean);
+        return parts.join('<br/>');
+      })(),
+      startDate: formatDate(offerData?.startDate),
+      interviewDate: formatDate(offerData?.interviewDate),
+      salary: formatSalary(offerData?.salary),
+      termsBlock: '',
+      salaryMatrix: '',
+      ...buildSalarySection()
+    });
+
+    // Use filledHtml for PDF
+    const pdfBuffer = await new Promise((resolve, reject) => {
+      htmlToPdf.create(filledHtml, { format: 'A4', border: '10mm' }).toBuffer((err, buffer) => {
+        if (err) return reject(err);
+        resolve(buffer);
+      });
+    });
+
+    const fileName = `offer_letter_${(candidateName || 'candidate').replace(/\s+/g, '_')}_${Date.now()}.pdf`;
+    const s3Key = `offer-letters/${fileName}`;
+    
+    // After:
+    await uploadToS3(pdfBuffer, s3Key, 'application/pdf');
+
+    // Add this pre-sign block (same style as sendReportToHR):
+    const command = new GetObjectCommand({
+      Bucket: process.env.MINIO_BUCKET_NAME,
+      Key: s3Key
+    });
+    const offerLetterUrl = await getSignedUrl(s3, command, { expiresIn: 604800 }); // 7 days
+
+    // Import both senders for clarity
+    const { sendOfferLetter, sendOfferLetterToHR } = require('./services/interviewService');
+
+    // Send to Candidate
+    await sendOfferLetter({
+      candidateName,
+      candidateEmail: assessment.candidateEmail || offerData?.candidateEmail, // fallback added
+      position: offerData?.position || assessment.jobTitle,
+      salary: offerData?.salary,
+      startDate: offerData?.startDate,
+      companyName: offerData?.companyName || user?.companyName
+    }, offerLetterUrl);
+
+    // Send to HR
+    await sendOfferLetterToHR({
+      hrEmail: user.email,
+      companyName: offerData?.companyName || user?.companyName,
+      candidateName,
+      position: offerData?.position || assessment.jobTitle,
+      salary: offerData?.salary,
+      startDate: offerData?.startDate,
+      assessmentScore: assessment.testResult?.combinedScore || 'N/A',
+      interviewRating: 'N/A'
+    }, offerLetterUrl);
+
+    return res.json({ success: true, s3Key });
+  } catch (error) {
+    console.error('Error finalizing offer:', error);
+    return res.status(500).json({ success: false, error: 'Failed to finalize offer' });
+  }
+});
+
+// Generate professional offer letter PDF
+async function generateProfessionalOfferLetter(data) {
+  const PDFDocument = require('pdfkit');
+  const doc = new PDFDocument({ margin: 50 });
+  const buffers = [];
+  
+  doc.on('data', buffers.push.bind(buffers));
+  
+  // Header
+  doc.fontSize(24)
+     .font('Helvetica-Bold')
+     .text('OFFER OF EMPLOYMENT', { align: 'center' });
+  
+  doc.moveDown(2);
+  
+  // Date
+  doc.fontSize(12)
+     .font('Helvetica')
+     .text(`Date: ${new Date().toLocaleDateString()}`, { align: 'right' });
+  
+  doc.moveDown(1);
+  
+  // Candidate details
+  doc.fontSize(12)
+     .text(`Dear ${data.candidateName},`, { align: 'left' });
+  
+  doc.moveDown(1);
+  
+  // Offer content
+  doc.fontSize(12)
+     .text(`We are pleased to extend an offer of employment for the position of ${data.position} at ${data.companyName}. After careful consideration of your qualifications and performance during the interview process, we believe you would be a valuable addition to our team.`, { align: 'justify' });
+  
+  doc.moveDown(1);
+  
+  // Position details
+  doc.fontSize(14)
+     .font('Helvetica-Bold')
+     .text('Position Details:', { align: 'left' });
+  
+  doc.moveDown(0.5);
+  doc.fontSize(12)
+     .font('Helvetica')
+     .text(`Position: ${data.position}`)
+     .text(`Start Date: ${data.startDate || 'To be determined'}`)
+     .text(`Salary: ${data.salary || 'To be discussed'}`);
+  
+  if (data.benefits) {
+    doc.text(`Benefits: ${data.benefits}`);
+  }
+  
+  doc.moveDown(1);
+  
+  // Performance summary
+  doc.fontSize(14)
+     .font('Helvetica-Bold')
+     .text('Performance Summary:', { align: 'left' });
+  
+  doc.moveDown(0.5);
+  doc.fontSize(12)
+     .font('Helvetica')
+     .text(`Assessment Score: ${data.assessmentScore}/100`)
+     .text(`Interview Rating: ${data.interviewRating}/5`);
+  
+  doc.moveDown(1);
+  
+  // Additional notes
+  if (data.notes) {
+    doc.fontSize(12)
+       .text(`Additional Terms: ${data.notes}`);
+    doc.moveDown(1);
+  }
+  
+  // Closing
+  doc.fontSize(12)
+     .text('We look forward to welcoming you to our team. Please confirm your acceptance of this offer by signing and returning this letter within 7 days.', { align: 'justify' });
+  
+  doc.moveDown(2);
+  
+  // Signature section
+  doc.text('Sincerely,')
+     .moveDown(1)
+     .text(data.hrName)
+     .text(data.hrEmail)
+     .text(data.companyName);
+  
+  doc.moveDown(2);
+  
+  // Candidate signature
+  doc.text('Candidate Signature: _________________________')
+     .text('Date: _________________________');
+  
+  doc.end();
+  
+  return new Promise((resolve, reject) => {
+    doc.on('end', () => {
+      const pdfBuffer = Buffer.concat(buffers);
+      resolve(pdfBuffer);
+    });
+    
+    doc.on('error', reject);
+  });
+}
+
+// Send professional rejection email
+async function sendProfessionalRejectionEmail(data) {
+  try {
+    const { candidateName, candidateEmail, reason, customReason, feedback, jobTitle, interviewFeedback } = data;
+    
+    // Get rejection reason text
+    let rejectionReasonText = '';
+    switch (reason) {
+      case 'requirements-not-matching':
+        rejectionReasonText = 'The position requirements did not align with your current qualifications';
+        break;
+      case 'location-not-suitable':
+        rejectionReasonText = 'The location requirements do not match your preferences';
+        break;
+      case 'resume-referred-other-roles':
+        rejectionReasonText = 'We will keep your resume on file for future opportunities that may be a better fit';
+        break;
+      case 'custom':
+        rejectionReasonText = customReason || 'We have decided to move forward with other candidates';
+        break;
+      default:
+        rejectionReasonText = 'We have decided to move forward with other candidates';
+    }
+    
+    // Create professional rejection email content
+    const emailContent = `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+        <div style="background-color: #f8f9fa; padding: 20px; border-radius: 8px; margin-bottom: 20px;">
+          <h2 style="color: #333; margin: 0;">Thank You for Your Interest</h2>
+        </div>
+        
+        <p>Dear ${candidateName},</p>
+        
+        <p>Thank you for your interest in the ${jobTitle} position and for taking the time to participate in our interview process. We appreciate the effort you put into your application and assessment.</p>
+        
+        <p>After careful consideration, we have decided not to move forward with your application at this time. ${rejectionReasonText}.</p>
+        
+        ${interviewFeedback ? `
+        <div style="background-color: #fff3cd; padding: 15px; border-radius: 5px; margin: 20px 0;">
+          <h3 style="color: #856404; margin-top: 0;">Interview Feedback</h3>
+          <p style="margin: 5px 0;"><strong>Overall Rating:</strong> ${interviewFeedback.rating}/5</p>
+          ${interviewFeedback.feedback ? `<p style="margin: 5px 0;"><strong>Feedback:</strong> ${interviewFeedback.feedback}</p>` : ''}
+          ${interviewFeedback.strengths ? `<p style="margin: 5px 0;"><strong>Strengths:</strong> ${interviewFeedback.strengths}</p>` : ''}
+          ${interviewFeedback.areasForImprovement ? `<p style="margin: 5px 0;"><strong>Areas for Improvement:</strong> ${interviewFeedback.areasForImprovement}</p>` : ''}
+        </div>
+        ` : ''}
+        
+        ${feedback ? `
+        <p><strong>Additional Feedback:</strong> ${feedback}</p>
+        ` : ''}
+        
+        <p>We encourage you to continue pursuing opportunities that align with your career goals. We will keep your information on file and may reach out if future positions become available that might be a better fit.</p>
+        
+        <p>Thank you again for your interest in joining our team.</p>
+        
+        <div style="margin-top: 30px;">
+          <p>Best regards,<br>
+          The HR Team</p>
+        </div>
+      </div>
+    `;
+    
+    // Send email using nodemailer
+    const mailOptions = {
+      from: `"SkillMatrix HR Team" <${process.env.SMTP_USER}>`,
+      to: candidateEmail,
+      subject: `Update on Your Application for ${jobTitle}`,
+      html: emailContent
+    };
+    
+    console.log(`📧 Sending rejection email to: ${candidateEmail}`);
+    await transporter.sendMail(mailOptions);
+    console.log(`✅ Professional rejection email sent successfully to ${candidateEmail}`);
+    
+  } catch (error) {
+    console.error('Error sending rejection email:', error);
+    throw error;
+  }
+}
+
+// Reject candidate
+app.post('/api/candidates/reject', authenticateJWT, async (req, res) => {
+  try {
+    const { candidateId, assessmentSessionId, rejectionData, interviewFeedback } = req.body;
+    
+    // Get assessment session data
+    const assessment = await AssessmentSession.findById(assessmentSessionId || candidateId)
+      .populate('resumeId');
+    
+    if (!assessment) {
+      return res.status(404).json({
+        success: false,
+        error: 'Assessment session not found'
+      });
+    }
+    
+    // Create candidate data from assessment
+    const candidate = {
+      _id: assessment._id,
+      name: assessment.resumeId?.name || assessment.candidateEmail,
+      email: assessment.candidateEmail
+    };
+    
+    // Generate professional rejection email
+    await sendProfessionalRejectionEmail({
+      candidateName: candidate.name,
+      candidateEmail: candidate.email,
+      reason: rejectionData.reason,
+      customReason: rejectionData.customReason,
+      feedback: rejectionData.feedback,
+      jobTitle: assessment.jobTitle,
+      interviewFeedback: interviewFeedback
+    });
+    
+    // Create candidate decision record
+    const candidateDecision = new CandidateDecision({
+      candidateId,
+      assessmentSessionId,
+      decision: 'rejected',
+      rejectionReason: rejectionData.reason,
+      customRejectionReason: rejectionData.customReason,
+      rejectionFeedback: rejectionData.feedback,
+      interviewFeedback: interviewFeedback,
+      emailSent: true,
+      emailSentAt: new Date(),
+      rejectionLetterGenerated: true,
+      decidedBy: req.user.id,
+      decidedAt: new Date()
+    });
+    
+    await candidateDecision.save();
+    
+    res.status(200).json({
+      success: true,
+      message: 'Candidate rejected and notification sent'
+    });
+    
+  } catch (error) {
+    console.error('Error rejecting candidate:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to reject candidate'
+    });
+  }
+});
+
+// Send interview invitation email to candidate and HR
+app.post('/api/interviews/send-invitation', authenticateJWT, async (req, res) => {
+  try {
+    const { sendInterviewInvitation } = require('./services/interviewEmailService');
+    const result = await sendInterviewInvitation(
+      req.body.candidateId,
+      req.body.assessmentSessionId,
+      req.body.interviewDetails,
+      req.user.id
+    );
+    res.status(200).json(result);
+  } catch (error) {
+    console.error('Error sending interview invitation:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to send interview invitation'
+    });
+  }
+});
+
+// Get all candidate decisions for the current user
+app.get('/api/candidate-decisions', authenticateJWT, async (req, res) => {
+  try {
+    const decisions = await CandidateDecision.find({ decidedBy: req.user.id })
+      .populate('scheduledTest')
+      .populate('interview')
+      .sort({ decidedAt: -1 });
+    
+    res.status(200).json(decisions);
+  } catch (error) {
+    console.error('Error fetching candidate decisions:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to fetch candidate decisions'
+    });
+  }
+});
+
+// ==============================
+
+// Document Collection Routes
+const documentCollectionRoutes = require('./routes/documentCollectionRoutes');
+app.use('/api/document-collection', authenticateJWT, documentCollectionRoutes);
+
+
+// Health check endpoint
+app.get('/health', (req, res) => {
+  res.status(200).json({
+    status: 'healthy',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    memory: process.memoryUsage(),
+    version: process.env.npm_package_version || '1.0.0'
+  });
+});
 
 app.set('trust proxy', true); // or a specific number if you're behind multiple proxies
 // Start Server

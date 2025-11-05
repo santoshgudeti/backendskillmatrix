@@ -48,6 +48,7 @@
     "nodemailer": "^7.0.3",
     "os": "^0.1.2",
     "path": "^0.12.7",
+    "pdf-lib": "^1.17.1",
     "pdfkit": "^0.15.2",
     "react-rnd": "^10.5.2",
     "react-router-dom": "^7.0.0",
@@ -57,7 +58,8 @@
     "socket.io-client": "^4.8.1",
     "stream": "^0.0.3",
     "undici": "^7.10.0",
-    "uuid": "^11.1.0"
+    "uuid": "^11.1.0",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "concurrently": "^9.1.0",
