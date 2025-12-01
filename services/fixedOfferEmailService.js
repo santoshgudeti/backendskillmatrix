@@ -5,25 +5,57 @@ const { getOfferLetterTemplate } = require('./offerLetterService');
 
 // Create transporter with better error handling
 const createTransporter = () => {
+  // Verify required environment variables
+  if (!process.env.SMTP_HOST) {
+    throw new Error('SMTP_HOST is not configured in environment variables');
+  }
+  
+  if (!process.env.SMTP_USER) {
+    throw new Error('SMTP_USER is not configured in environment variables');
+  }
+  
+  if (!process.env.SMTP_PASS) {
+    throw new Error('SMTP_PASS is not configured in environment variables');
+  }
+  
+  // Parse SMTP port as number
+  const smtpPort = Number(process.env.SMTP_PORT) || 465;
+  
+  // Log configuration for debugging
+  console.log('📧 SMTP Configuration:', {
+    host: process.env.SMTP_HOST,
+    port: smtpPort,
+    secure: smtpPort === 465,
+    user: process.env.SMTP_USER
+  });
+  
   return nodemailer.createTransport({
     host: process.env.SMTP_HOST,
-    port: process.env.SMTP_PORT || 587,
-    secure: process.env.SMTP_PORT == 465,
+    port: smtpPort,
+    secure: smtpPort === 465,
     auth: {
       user: process.env.SMTP_USER,
       pass: process.env.SMTP_PASS,
     },
     tls: {
       rejectUnauthorized: false
-    }
+    },
+    debug: true, // Enable debug output
+    logger: true // Log information in Nodemailer
   });
 };
 
 // Create S3 client
 const createS3Client = () => {
+  // Ensure endpoint has protocol
+  let endpoint = process.env.MINIO_ENDPOINT;
+  if (endpoint && !endpoint.startsWith('http')) {
+    endpoint = `https://${endpoint}`;
+  }
+  
   return new S3Client({
     region: process.env.MINIO_REGION || 'us-east-1',
-    endpoint: process.env.MINIO_ENDPOINT,
+    endpoint: endpoint,
     forcePathStyle: true,
     credentials: {
       accessKeyId: process.env.MINIO_ACCESS_KEY,
@@ -242,13 +274,15 @@ const sendOfferLetterToBoth = async (offerData, s3Key) => {
       to: offerData.hrEmail || process.env.SMTP_USER,
       subject: `📋 Offer Letter Sent - ${offerData.candidateName} (${offerData.position})`,
       html: `
-        <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 600px; margin: 0 auto; background: #f8fafc; padding: 20px;">
+        <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 600px; margin: 0 auto; background:rgb(0, 0, 0); padding: 20px;">
           <div style="background: white; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 20px rgba(0,0,0,0.1);">
             
             <!-- Header -->
             <div style="background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%); padding: 30px; text-align: center; color: white;">
-              <h1 style="margin: 0; font-size: 24px; font-weight: 700;">📋 Offer Letter Sent</h1>
-              <p style="margin: 10px 0 0 0; font-size: 14px; opacity: 0.9;">HR Notification</p>
+             <h1 style="margin: 0; font-size: 24px; font-weight: 700; color: #000;">📋 Offer Letter Sent</h1>
+
+              <p style="margin: 10px 0 0 0; font-size: 14px; opacity: 0.9; color: #000;">HR Notification</p>
+
             </div>
             
             <!-- Content -->
@@ -292,12 +326,13 @@ const sendOfferLetterToBoth = async (offerData, s3Key) => {
               
               <!-- Action Buttons -->
               <div style="text-align: center; margin: 30px 0;">
-                <a href="${signedUrl}" 
-                   style="display: inline-block; background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%); 
-                          color: white; padding: 12px 25px; text-decoration: none; border-radius: 8px; 
-                          font-weight: 600; margin: 0 10px; box-shadow: 0 4px 15px rgba(59, 130, 246, 0.3);">
-                  📄 View Offer Letter
-                </a>
+               <a href="${signedUrl}" 
+   style="display: inline-block; background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%); 
+          color: #000; padding: 12px 25px; text-decoration: none; border-radius: 8px; 
+          font-weight: 600; margin: 0 10px; box-shadow: 0 4px 15px rgba(59, 130, 246, 0.3);">
+  📄 View Offer Letter
+</a>
+
               </div>
               
               <!-- Status Info -->
@@ -345,7 +380,13 @@ const sendOfferLetterToBoth = async (offerData, s3Key) => {
 
   } catch (error) {
     console.error('❌ Error sending offer letters:', error);
-    throw error;
+    console.error('❌ Error details:', {
+      message: error.message,
+      code: error.code,
+      command: error.command,
+      stack: error.stack
+    });
+    throw new Error(`Failed to send offer letter email: ${error.message}`);
   }
 };
 

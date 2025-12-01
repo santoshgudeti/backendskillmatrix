@@ -2,6 +2,11 @@ const axios = require('axios');
 const FormData = require('form-data');
 const nodemailer = require('nodemailer');
 const mongoose = require('mongoose');
+const { v4: uuidv4 } = require('uuid');
+const path = require('path');
+
+// Import the uploadToS3 function from the interviewService
+const { uploadToS3 } = require('./interviewService');
 
 /**
  * Service to handle automatic job posting to external system
@@ -220,12 +225,29 @@ async function validateJobPoster(userEmail) {
 }
 
 // Function to create job post in external system
-async function createExternalJobPost(jobDetails, jobPoster) {
+async function createExternalJobPost(jobDetails, jobPoster, jobDescriptionBuffer, filename) {
   try {
     console.log('📤 Creating job post in external system...');
     
     // Access models from mongoose (they're already defined in server.js)
     const JobPost = mongoose.model('JobPost');
+    
+    // Upload job description file to S3 if provided
+    let s3Key = '';
+    if (jobDescriptionBuffer && filename) {
+      try {
+        const safeTitle = (jobDetails.title || 'Untitled').replace(/\s+/g, '_');
+        const fileName = `JD_${safeTitle}_${Date.now()}_${uuidv4()}${path.extname(filename)}`;
+        const folderPrefix = process.env.MINIO_JD_FOLDER || 'jobposting-jd-files';
+        const key = `${folderPrefix}/${fileName}`;
+        const result = await uploadToS3(jobDescriptionBuffer, key, 'application/pdf'); // Assuming PDF, but could be dynamic
+        s3Key = result?.Key || key;
+        console.log(`✅ Job description file uploaded to S3: ${s3Key}`);
+      } catch (uploadError) {
+        console.error('❌ Error uploading job description file to S3:', uploadError.message);
+        // Continue without the file if upload fails
+      }
+    }
     
     // Prepare job post data - properly mapping fields from extracted data
     const jobPostData = {
@@ -238,6 +260,7 @@ async function createExternalJobPost(jobDetails, jobPoster) {
       skillsRequired: jobDetails.skills ? jobDetails.skills.split(',').map(skill => skill.trim()) : [], // Convert comma-separated string to array
       salaryRange: jobDetails.salary || 'Negotiable',
       descriptionText: jobDetails.description || '',
+      jobDescriptionFile: s3Key, // Add the S3 key for the job description file
       postedBy: jobPoster._id
     };
 
@@ -283,8 +306,8 @@ async function handleAutomaticJobPosting(jobDescriptionBuffer, filename, userEma
     // Step 2: Extract job details from JD
     const jobDetails = await extractJobDetailsFromJD(jobDescriptionBuffer, filename);
     
-    // Step 3: Create job post in external system
-    const result = await createExternalJobPost(jobDetails, validation.jobPoster);
+    // Step 3: Create job post in external system (pass the job description buffer and filename)
+    const result = await createExternalJobPost(jobDetails, validation.jobPoster, jobDescriptionBuffer, filename);
     
     // Step 4: Send notification email to HR with job details and public URL
     await sendHRNotificationEmail(userEmail, jobDetails, result.publicUrl, result.jobPost._id);

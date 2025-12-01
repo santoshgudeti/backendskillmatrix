@@ -38,11 +38,14 @@ const htmlToPdf = require('html-pdf');
 const sendConsentEmail = require('./services/sendConsentMail'); // Or wherever you place it
 const { handleAutomaticJobPosting } = require('./services/externalJobPostingService');
 const { MergedDocument, generateMergedPDF, getMergedDocuments } = require('./services/mergedPDFService');
+const letterheadService = require('./services/letterheadService');
+const industrialOfferLetterService = require('./services/industrialOfferLetterService');
+const Letterhead = require('./models/Letterhead');
 
 dotenv.config();
 // Initialize Express app
 const app = express();
-const PORT = process.env.PORT;  
+const PORT = process.env.PORT;
 
 // Create an HTTP server to support WebSockets
 const server = http.createServer(app);
@@ -71,9 +74,9 @@ app.set('views', path.join(__dirname, 'views'));
 
 
 mongoose
-.connect(process.env.MONGO_URI)
-.then(() => console.log("MongoDB connected"))
-.catch((err) => console.error("MongoDB connection error:", err));
+  .connect(process.env.MONGO_URI)
+  .then(() => console.log("MongoDB connected"))
+  .catch((err) => console.error("MongoDB connection error:", err));
 // Schemas
 // SendGrid configuration
 // Replace current multer config with memory storage:
@@ -83,7 +86,7 @@ const audioUpload = multer({
   storage: memoryStorage,
   fileFilter: (req, file, cb) => {
     if (
-      file.mimetype === 'audio/wav' || 
+      file.mimetype === 'audio/wav' ||
       file.mimetype === 'audio/x-wav' ||
       file.mimetype === 'audio/wave' ||
       file.originalname.match(/\.wav$/i)
@@ -93,7 +96,7 @@ const audioUpload = multer({
       cb(new Error('Only WAV audio files are allowed'), false);
     }
   },
-  
+
 }).single('audio');
 
 const upload = multer({ storage: memoryStorage });
@@ -110,9 +113,9 @@ const userSchema = new mongoose.Schema({
   isApproved: { type: Boolean, default: false },
   // Removed isUnlimited field as it's redundant
   subscription: {
-    plan: { 
-      type: String, 
-      enum: ['trial', 'free', 'paid', 'admin'], 
+    plan: {
+      type: String,
+      enum: ['trial', 'free', 'paid', 'admin'],
       default: 'trial',
       required: true
     },
@@ -131,7 +134,7 @@ const userSchema = new mongoose.Schema({
     resumeUploads: { type: Number, default: 0 },
     assessments: { type: Number, default: 0 }
   },
- 
+
 }, { timestamps: true });
 
 const User = mongoose.model('User', userSchema);
@@ -154,7 +157,7 @@ const JobDescriptionSchema = new Schema({
   filename: { type: String, required: true },
   uploadedAt: { type: Date, default: Date.now },
   hash: { type: String, unique: true },
-    user: { type: Schema.Types.ObjectId, ref: 'User', required: true } // Added
+  user: { type: Schema.Types.ObjectId, ref: 'User', required: true } // Added
 });
 
 
@@ -209,7 +212,7 @@ const VoiceAnswerSchema = new mongoose.Schema({
       UniqueQualities: Number,
       total_average: Number,
       total_overall_score: Number
-     
+
     },
     processedAt: Date,
     status: {
@@ -270,14 +273,14 @@ const AssessmentSessionSchema = new Schema({
   recording: { type: Schema.Types.ObjectId, ref: 'Recording' },
   testResult: { type: Schema.Types.ObjectId, ref: 'TestResult' },
   voiceAnswers: [{ type: Schema.Types.ObjectId, ref: 'VoiceAnswer' }],
-// Update AssessmentSession schema to store user answers
-questions: [{
-  id: String,
-  question: String,
-  options: [String],
-  correctAnswer: String,
-  userAnswer: String // Add this field to store user's answer
-}],
+  // Update AssessmentSession schema to store user answers
+  questions: [{
+    id: String,
+    question: String,
+    options: [String],
+    correctAnswer: String,
+    userAnswer: String // Add this field to store user's answer
+  }],
   voiceQuestions: [{
     id: String,
     question: String
@@ -292,15 +295,15 @@ questions: [{
   startedAt: { type: Date, default: Date.now },
   completedAt: { type: Date },
   status: { type: String, enum: ['pending', 'in-progress', 'completed'], default: 'pending' },
-   user: { type: Schema.Types.ObjectId, ref: 'User', required: true }, // Added
+  user: { type: Schema.Types.ObjectId, ref: 'User', required: true }, // Added
 
-    reportStatus: {
+  reportStatus: {
     type: String,
     enum: ['pending', 'processing', 'completed', 'failed'],
     default: 'pending'
   },
   reportGeneratedAt: Date
-  
+
 });
 
 console.log("✅ MongoDB Schema and Model Initialized");
@@ -317,17 +320,17 @@ const TestResultSchema = new Schema({
   assessmentSession: { type: Schema.Types.ObjectId, ref: 'AssessmentSession', required: true },
   submittedAt: { type: Date, default: Date.now },
   status: { type: String, enum: ['pending', 'completed', 'expired'], default: 'pending' },
-    user: { type: Schema.Types.ObjectId, ref: 'User', required: true } // Added
+  user: { type: Schema.Types.ObjectId, ref: 'User', required: true } // Added
 
 }, { timestamps: true });
 const TestResult = mongoose.model('TestResult', TestResultSchema);
 
 // Add near other schemas
 const ReportSchema = new mongoose.Schema({
-  assessmentSession: { 
-    type: Schema.Types.ObjectId, 
+  assessmentSession: {
+    type: Schema.Types.ObjectId,
     ref: 'AssessmentSession',
-    required: true 
+    required: true
   },
   s3Key: { type: String, required: true },
   filename: { type: String, required: true },
@@ -369,10 +372,10 @@ const ScheduledTest = mongoose.model('ScheduledTest', ScheduledTestSchema);
 
 // Add new Interview schema
 const InterviewSchema = new mongoose.Schema({
-  scheduledTest: { 
-    type: Schema.Types.ObjectId, 
-    ref: 'ScheduledTest', 
-    required: true 
+  scheduledTest: {
+    type: Schema.Types.ObjectId,
+    ref: 'ScheduledTest',
+    required: true
   },
   candidateName: { type: String, required: true },
   candidateEmail: { type: String, required: true },
@@ -401,21 +404,21 @@ const Interview = mongoose.model('Interview', InterviewSchema);
 
 // Add new CandidateDecision schema
 const CandidateDecisionSchema = new mongoose.Schema({
-  candidateId: { 
-    type: Schema.Types.ObjectId, 
+  candidateId: {
+    type: Schema.Types.ObjectId,
     ref: 'Candidate'
   },
   assessmentSessionId: {
     type: Schema.Types.ObjectId,
     ref: 'AssessmentSession'
   },
-  scheduledTest: { 
-    type: Schema.Types.ObjectId, 
+  scheduledTest: {
+    type: Schema.Types.ObjectId,
     ref: 'ScheduledTest'
   },
-  interview: { 
-    type: Schema.Types.ObjectId, 
-    ref: 'Interview' 
+  interview: {
+    type: Schema.Types.ObjectId,
+    ref: 'Interview'
   },
   decision: {
     type: String,
@@ -517,8 +520,8 @@ const DocumentCollection = require('./models/DocumentCollection');
 
 const outputDir = path.join(os.tmpdir(), `whisper_${Date.now()}`);
 
- // Create NodeMailer transporter using custom SMTP
- const transporter = nodemailer.createTransport({
+// Create NodeMailer transporter using custom SMTP
+const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST,
   port: process.env.SMTP_PORT,
   secure: true, // Use STARTTLS instead of direct TLS
@@ -554,7 +557,7 @@ const isAdmin = (req, res, next) => {
 function authenticateJobPoster(req, res, next) {
   const token = req.cookies?.jobToken || req.headers.authorization?.split(' ')[1];
   const adminToken = req.cookies?.token || req.headers.authorization?.split(' ')[1];
-  
+
   // First try normal HR auth
   if (token) {
     try {
@@ -565,7 +568,7 @@ function authenticateJobPoster(req, res, next) {
       // Continue to admin check
     }
   }
-  
+
   // Then try admin auth
   if (adminToken) {
     try {
@@ -578,7 +581,7 @@ function authenticateJobPoster(req, res, next) {
       return res.status(403).json({ message: 'Invalid token' });
     }
   }
-  
+
   return res.status(401).json({ message: 'Login required' });
 }
 
@@ -586,7 +589,7 @@ function authenticateJobPoster(req, res, next) {
 
 const verifyOwnership = (model) => async (req, res, next) => {
   try {
- const id = req.params.resumeId || req.params.jobDescriptionId || req.params.sessionId || req.params.id;
+    const id = req.params.resumeId || req.params.jobDescriptionId || req.params.sessionId || req.params.id;
 
     console.log(`Verifying ownership for ${model.modelName} ${id}`);
 
@@ -609,7 +612,7 @@ const verifyOwnership = (model) => async (req, res, next) => {
         documentOwner: doc.user,
         requestingUser: req.user.id
       });
-      return res.status(403).json({ 
+      return res.status(403).json({
         error: 'Access denied',
         details: {
           documentOwner: doc.user,
@@ -622,7 +625,7 @@ const verifyOwnership = (model) => async (req, res, next) => {
     next();
   } catch (error) {
     console.error('Ownership verification error:', error);
-    res.status(500).json({ 
+    res.status(500).json({
       error: 'Server error',
       details: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
@@ -693,20 +696,20 @@ async function generateAssessmentReport(sessionId, userId) {
       .text(`Assessment Date: ${session.completedAt.toLocaleDateString()}`, 60);
 
     // Performance Summary
- doc.addPage();
-const chartY = drawSectionBox(400); // increased height
-doc.fillColor('#1e293b').fontSize(14)
-  .text('Performance Summary', 70, chartY + 10, { underline: true });
+    doc.addPage();
+    const chartY = drawSectionBox(400); // increased height
+    doc.fillColor('#1e293b').fontSize(14)
+      .text('Performance Summary', 70, chartY + 10, { underline: true });
 
-const chartBuffer = await createScoreChart({
-  mcq: testResult.score,
-  audio: testResult.audioScore,
-  text: testResult.textScore,
-  video: testResult.videoScore,
-  combined: testResult.combinedScore,
-});
+    const chartBuffer = await createScoreChart({
+      mcq: testResult.score,
+      audio: testResult.audioScore,
+      text: testResult.textScore,
+      video: testResult.videoScore,
+      combined: testResult.combinedScore,
+    });
 
-doc.image(chartBuffer, 110, chartY + 40, { fit: [400, 250] }); // moved down to avoid overlap
+    doc.image(chartBuffer, 110, chartY + 40, { fit: [400, 250] }); // moved down to avoid overlap
 
     doc.fontSize(12).fillColor('#475569')
       .text(`MCQ Score: ${testResult.score.toFixed(2)}/100`, 60, chartY + 280)
@@ -716,11 +719,11 @@ doc.image(chartBuffer, 110, chartY + 40, { fit: [400, 250] }); // moved down to 
       .text(`Combined Score: ${testResult.combinedScore.toFixed(2)}/100`, 60);
 
     // MCQ Section
- doc.addPage();
-const headingY = drawSectionBox(60);
-doc.fillColor('#1e293b').fontSize(14)
-  .text('MCQ Assessment Details', 70, headingY + 15, { underline: true });
-doc.moveDown(1);
+    doc.addPage();
+    const headingY = drawSectionBox(60);
+    doc.fillColor('#1e293b').fontSize(14)
+      .text('MCQ Assessment Details', 70, headingY + 15, { underline: true });
+    doc.moveDown(1);
 
 
     session.questions.forEach((q, i) => {
@@ -735,11 +738,11 @@ doc.moveDown(1);
     });
 
     // Voice Section
-doc.addPage();
-const voiceY = drawSectionBox(); // Use default height or specify
-doc.fillColor('#1e293b').fontSize(14)
-  .text('Voice Assessment', 70, voiceY + 15, { underline: true });
-doc.moveDown(1);
+    doc.addPage();
+    const voiceY = drawSectionBox(); // Use default height or specify
+    doc.fillColor('#1e293b').fontSize(14)
+      .text('Voice Assessment', 70, voiceY + 15, { underline: true });
+    doc.moveDown(1);
 
 
 
@@ -751,33 +754,33 @@ doc.moveDown(1);
 
       const boxHeight = 160 + (Object.keys(metrics).length * 12);
       const y = drawSectionBox(boxHeight);
-const boxStartX = 80;
+      const boxStartX = 80;
 
-doc.fontSize(12).fillColor('#334155').font('Helvetica-Bold')
-  .text(`Q${i + 1}: ${answer.question}`, boxStartX, y + 15, {
-    width: doc.page.width - 160,
-    lineBreak: true,
-  });
+      doc.fontSize(12).fillColor('#334155').font('Helvetica-Bold')
+        .text(`Q${i + 1}: ${answer.question}`, boxStartX, y + 15, {
+          width: doc.page.width - 160,
+          lineBreak: true,
+        });
 
-doc.fontSize(10).font('Helvetica').fillColor('#64748b')
-  .text(`Answer: ${answer.answer || 'No answer provided'}`, boxStartX + 20, doc.y, {
-    width: doc.page.width - 160,
-    lineBreak: true,
-  })
-  .text(`Audio Score: ${Number(audioScore).toFixed(2)}/100`, boxStartX + 20)
-  .text(`Text Evaluation Score: ${Number(textScore).toFixed(2)}/100`, boxStartX + 20);
+      doc.fontSize(10).font('Helvetica').fillColor('#64748b')
+        .text(`Answer: ${answer.answer || 'No answer provided'}`, boxStartX + 20, doc.y, {
+          width: doc.page.width - 160,
+          lineBreak: true,
+        })
+        .text(`Audio Score: ${Number(audioScore).toFixed(2)}/100`, boxStartX + 20)
+        .text(`Text Evaluation Score: ${Number(textScore).toFixed(2)}/100`, boxStartX + 20);
 
-if (metrics) {
-  doc.moveDown(0.2);
-  doc.font('Helvetica-Bold').text('Detailed Text Metrics:', boxStartX + 20, doc.y);
-  doc.font('Helvetica');
-  Object.entries(metrics).forEach(([key, value]) => {
-    if (!['total_average', 'total_overall_score'].includes(key)) {
-      const val = typeof value === 'number' ? value.toFixed(2) : value;
-      doc.text(`• ${key}: ${val}`, boxStartX + 40, doc.y);
-    }
-  });
-}
+      if (metrics) {
+        doc.moveDown(0.2);
+        doc.font('Helvetica-Bold').text('Detailed Text Metrics:', boxStartX + 20, doc.y);
+        doc.font('Helvetica');
+        Object.entries(metrics).forEach(([key, value]) => {
+          if (!['total_average', 'total_overall_score'].includes(key)) {
+            const val = typeof value === 'number' ? value.toFixed(2) : value;
+            doc.text(`• ${key}: ${val}`, boxStartX + 40, doc.y);
+          }
+        });
+      }
 
 
       doc.moveDown(2);
@@ -823,7 +826,7 @@ async function createScoreChart(scores) {
 
   ctx.fillStyle = '#f8fafc';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
-ctx.font = 'bold 13px "DejaVu Sans"';
+  ctx.font = 'bold 13px "DejaVu Sans"';
 
 
   keys.forEach((key, i) => {
@@ -845,7 +848,7 @@ ctx.font = 'bold 13px "DejaVu Sans"';
 async function waitForScores(sessionId) {
   const maxAttempts = 30;
   let attempts = 0;
-  
+
   while (attempts < maxAttempts) {
     const [testResult, recording, voiceAnswers] = await Promise.all([
       TestResult.findOne({ assessmentSession: sessionId }),
@@ -854,32 +857,32 @@ async function waitForScores(sessionId) {
     ]);
 
     // Enhanced check for text evaluation completion
-    const scoresReady = testResult && 
-      testResult.audioScore !== undefined && 
+    const scoresReady = testResult &&
+      testResult.audioScore !== undefined &&
       testResult.textScore !== undefined && // Ensure textScore is checked
-      testResult.videoScore !== undefined && 
+      testResult.videoScore !== undefined &&
       testResult.combinedScore !== undefined;
 
-    const processingComplete = 
+    const processingComplete =
       (!recording || recording.videoAnalysis?.status === 'completed') &&
-      voiceAnswers.every(a => 
-        (a.processingStatus === 'completed' || 
-         a.processingStatus === 'failed' ||
-         a.processingStatus === 'skipped') &&
+      voiceAnswers.every(a =>
+        (a.processingStatus === 'completed' ||
+          a.processingStatus === 'failed' ||
+          a.processingStatus === 'skipped') &&
         (a.textEvaluation?.status === 'completed' ||
-         a.textEvaluation?.status === 'failed' ||
-         a.textEvaluation?.status === 'skipped')
+          a.textEvaluation?.status === 'failed' ||
+          a.textEvaluation?.status === 'skipped')
       );
 
     if (scoresReady && processingComplete) {
       return;
     }
-    
+
     attempts++;
-  await new Promise(resolve => setTimeout(resolve, 2 * 60 * 1000)); // 5 minutes
+    await new Promise(resolve => setTimeout(resolve, 2 * 60 * 1000)); // 5 minutes
 
   }
-  
+
   throw new Error('Timeout waiting for scores to be calculated');
 }
 
@@ -917,7 +920,7 @@ async function sendReportEmail(userEmail, reportUrl, candidateEmail, jobTitle) {
 app.get('/api/resumes/:resumeId', authenticateJWT, verifyOwnership(Resume), async (req, res) => {
   try {
     const { resumeId } = req.params;
-    
+
     // More thorough validation
     if (!mongoose.Types.ObjectId.isValid(resumeId)) {
       return res.status(400).json({ error: 'Invalid resume ID format' });
@@ -935,31 +938,31 @@ app.get('/api/resumes/:resumeId', authenticateJWT, verifyOwnership(Resume), asyn
     const command = new GetObjectCommand({
       Bucket: process.env.MINIO_BUCKET_NAME,
       Key: resume.s3Key,
-      ResponseContentDisposition: req.query.download 
-        ? `attachment; filename="${encodeURIComponent(resume.filename)}"` 
+      ResponseContentDisposition: req.query.download
+        ? `attachment; filename="${encodeURIComponent(resume.filename)}"`
         : 'inline'
     });
-    
+
     const url = await getSignedUrl(s3, command); // 1 hour expiration
-    
-    res.json({ 
+
+    res.json({
       success: true,
       url,
       filename: resume.filename,
-     
+
     });
 
   } catch (error) {
     console.error('Error retrieving resume:', error);
-    
+
     let errorMessage = 'Failed to retrieve resume';
     if (error.name === 'NoSuchKey') {
       errorMessage = 'Resume file not found in storage';
     } else if (error.name === 'AccessDenied') {
       errorMessage = 'Access to resume denied';
     }
-    
-    res.status(500).json({ 
+
+    res.status(500).json({
       success: false,
       error: errorMessage,
       details: process.env.NODE_ENV === 'development' ? error.message : undefined
@@ -971,7 +974,7 @@ app.get('/api/resumes/:resumeId', authenticateJWT, verifyOwnership(Resume), asyn
 app.post('/api/resumes/bulk-download', authenticateJWT, async (req, res) => {
   try {
     const { resumeIds, candidates } = req.body;
-    
+
     console.log('🔥 [BULK DOWNLOAD API] Starting bulk resume download:', {
       userId: req.user.id,
       resumeCount: resumeIds?.length || 0,
@@ -1034,31 +1037,31 @@ app.post('/api/resumes/bulk-download', authenticateJWT, async (req, res) => {
           Bucket: process.env.MINIO_BUCKET_NAME,
           Key: resume.s3Key
         });
-        
+
         const response = await s3.send(command);
         const buffer = await streamToBuffer(response.Body);
-        
+
         // Find candidate info for better filename
-        const candidateInfo = candidates?.find(c => 
-          c.resumeId === resume._id.toString() || 
+        const candidateInfo = candidates?.find(c =>
+          c.resumeId === resume._id.toString() ||
           c.resumeId === resume._id
         );
-        
+
         // Create safe filename
-        const safeName = candidateInfo?.name ? 
-          candidateInfo.name.replace(/[^a-zA-Z0-9]/g, '_') : 
+        const safeName = candidateInfo?.name ?
+          candidateInfo.name.replace(/[^a-zA-Z0-9]/g, '_') :
           `Candidate_${i + 1}`;
-        
-        const fileExt = resume.filename ? 
+
+        const fileExt = resume.filename ?
           resume.filename.split('.').pop() || 'pdf' : 'pdf';
-        
-        const zipFilename = candidateInfo?.matchingPercentage ? 
+
+        const zipFilename = candidateInfo?.matchingPercentage ?
           `${safeName}_${candidateInfo.matchingPercentage}%.${fileExt}` :
           `${safeName}.${fileExt}`;
-        
+
         // Add to ZIP
         zip.file(zipFilename, buffer);
-        
+
         successCount++;
         downloadResults.push({
           resumeId: resume._id,
@@ -1068,9 +1071,9 @@ app.post('/api/resumes/bulk-download', authenticateJWT, async (req, res) => {
           candidateName: candidateInfo?.name || 'Unknown',
           matchingPercentage: candidateInfo?.matchingPercentage || 0
         });
-        
+
         console.log(`✅ [BULK DOWNLOAD API] Resume added to ZIP: ${zipFilename}`);
-        
+
       } catch (error) {
         console.error(`❌ [BULK DOWNLOAD API] Failed to process resume ${resume._id}:`, error);
         failureCount++;
@@ -1094,12 +1097,12 @@ app.post('/api/resumes/bulk-download', authenticateJWT, async (req, res) => {
 
     // Generate ZIP buffer
     console.log('📦 [BULK DOWNLOAD API] Generating ZIP file...');
-    const zipBuffer = await zip.generateAsync({ 
+    const zipBuffer = await zip.generateAsync({
       type: 'nodebuffer',
       compression: 'DEFLATE',
       compressionOptions: { level: 6 }
     });
-    
+
     console.log('✅ [BULK DOWNLOAD API] ZIP file generated:', {
       sizeBytes: zipBuffer.length,
       sizeMB: (zipBuffer.length / 1024 / 1024).toFixed(2)
@@ -1114,18 +1117,18 @@ app.post('/api/resumes/bulk-download', authenticateJWT, async (req, res) => {
       ContentType: 'application/zip',
       ContentDisposition: `attachment; filename="bulk_resumes_${new Date().toISOString().split('T')[0]}.zip"`
     });
-    
+
     await s3.send(zipUploadCommand);
-    
+
     // Generate signed download URL
     const downloadCommand = new GetObjectCommand({
       Bucket: process.env.MINIO_BUCKET_NAME,
       Key: zipKey,
       ResponseContentDisposition: `attachment; filename="bulk_resumes_${new Date().toISOString().split('T')[0]}.zip"`
     });
-    
+
     const downloadUrl = await getSignedUrl(s3, downloadCommand, { expiresIn: 3600 }); // 1 hour
-    
+
     console.log('🎉 [BULK DOWNLOAD API] Bulk download completed successfully:', {
       successCount,
       failureCount,
@@ -1148,7 +1151,7 @@ app.post('/api/resumes/bulk-download', authenticateJWT, async (req, res) => {
 
   } catch (error) {
     console.error('❌ [BULK DOWNLOAD API] Bulk download failed:', error);
-    
+
     let errorMessage = 'Failed to create bulk download';
     if (error.message.includes('timeout')) {
       errorMessage = 'Download timeout - too many files or network issues';
@@ -1157,7 +1160,7 @@ app.post('/api/resumes/bulk-download', authenticateJWT, async (req, res) => {
     } else if (error.message.includes('AccessDenied')) {
       errorMessage = 'Access denied to some resume files';
     }
-    
+
     res.status(500).json({
       success: false,
       error: errorMessage,
@@ -1174,12 +1177,12 @@ app.post('/api/resumes/bulk-download', authenticateJWT, async (req, res) => {
 app.post('/api/merged-pdf/generate/:sessionId', authenticateJWT, verifyOwnership(AssessmentSession), async (req, res) => {
   try {
     const { sessionId } = req.params;
-    
+
     console.log(`🔄 [MERGED PDF API] Generating merged PDF for session: ${sessionId}`);
-    
+
     // Generate merged PDF using the service
     const result = await generateMergedPDF(sessionId, req.user.id);
-    
+
     if (result.success) {
       // Generate signed URL for download
       const command = new GetObjectCommand({
@@ -1187,11 +1190,11 @@ app.post('/api/merged-pdf/generate/:sessionId', authenticateJWT, verifyOwnership
         Key: result.s3Key,
         ResponseContentDisposition: req.query.download ? `attachment; filename="${result.filename}"` : `inline`
       });
-      
+
       const downloadUrl = await getSignedUrl(s3, command, { expiresIn: 3600 }); // 1 hour
-      
+
       console.log(`✅ [MERGED PDF API] Generated merged PDF: ${result.mergedDocumentId}`);
-      
+
       res.json({
         success: true,
         message: result.existed ? 'Merged PDF already exists' : 'Merged PDF generated successfully',
@@ -1203,10 +1206,10 @@ app.post('/api/merged-pdf/generate/:sessionId', authenticateJWT, verifyOwnership
     } else {
       throw new Error('Failed to generate merged PDF');
     }
-    
+
   } catch (error) {
     console.error(`❌ [MERGED PDF API] Error generating merged PDF for session ${req.params.sessionId}:`, error);
-    
+
     let errorMessage = 'Failed to generate merged PDF';
     if (error.message.includes('Assessment session not found')) {
       errorMessage = 'Assessment session not found';
@@ -1215,7 +1218,7 @@ app.post('/api/merged-pdf/generate/:sessionId', authenticateJWT, verifyOwnership
     } else if (error.message.includes('Assessment report not found')) {
       errorMessage = 'Assessment report not available for this session';
     }
-    
+
     res.status(500).json({
       success: false,
       error: errorMessage,
@@ -1228,21 +1231,21 @@ app.post('/api/merged-pdf/generate/:sessionId', authenticateJWT, verifyOwnership
 app.get('/api/merged-pdf/list', authenticateJWT, async (req, res) => {
   try {
     const { page = 1, limit = 20, status = 'completed' } = req.query;
-    
+
     console.log(`📋 [MERGED PDF API] Fetching merged documents for user: ${req.user.id}`);
-    
+
     const result = await getMergedDocuments(req.user.id, {
       page: parseInt(page),
       limit: parseInt(limit),
       status
     });
-    
+
     res.json({
       success: true,
       data: result.documents,
       pagination: result.pagination
     });
-    
+
   } catch (error) {
     console.error(`❌ [MERGED PDF API] Error fetching merged documents:`, error);
     res.status(500).json({
@@ -1257,40 +1260,40 @@ app.get('/api/merged-pdf/list', authenticateJWT, async (req, res) => {
 app.get('/api/merged-pdf/:mergedDocId', authenticateJWT, async (req, res) => {
   try {
     const { mergedDocId } = req.params;
-    
+
     console.log(`📥 [MERGED PDF API] Downloading merged PDF: ${mergedDocId}`);
-    
+
     // Find merged document with ownership verification
     const mergedDoc = await MergedDocument.findOne({
       _id: mergedDocId,
       user: req.user.id
     });
-    
+
     if (!mergedDoc) {
       return res.status(404).json({
         success: false,
         error: 'Merged document not found or access denied'
       });
     }
-    
+
     if (mergedDoc.status !== 'completed') {
       return res.status(400).json({
         success: false,
         error: `Merged document is not ready (status: ${mergedDoc.status})`
       });
     }
-    
+
     // Generate signed URL for download
     const command = new GetObjectCommand({
       Bucket: process.env.MINIO_BUCKET_NAME,
       Key: mergedDoc.s3Key,
-      ResponseContentDisposition: req.query.download 
-        ? `attachment; filename="${encodeURIComponent(mergedDoc.filename)}"` 
+      ResponseContentDisposition: req.query.download
+        ? `attachment; filename="${encodeURIComponent(mergedDoc.filename)}"`
         : 'inline'
     });
-    
+
     const url = await getSignedUrl(s3, command, { expiresIn: 3600 }); // 1 hour
-    
+
     res.json({
       success: true,
       url,
@@ -1299,7 +1302,7 @@ app.get('/api/merged-pdf/:mergedDocId', authenticateJWT, async (req, res) => {
       jobTitle: mergedDoc.jobTitle,
       generatedAt: mergedDoc.generatedAt
     });
-    
+
   } catch (error) {
     console.error(`❌ [MERGED PDF API] Error downloading merged PDF:`, error);
     res.status(500).json({
@@ -1314,7 +1317,7 @@ app.get('/api/merged-pdf/:mergedDocId', authenticateJWT, async (req, res) => {
 app.post('/api/merged-pdf/bulk-download', authenticateJWT, async (req, res) => {
   try {
     const { assessmentSessionIds, candidates } = req.body;
-    
+
     console.log('🔥 [MERGED PDF BULK] Starting bulk merged PDF download:', {
       userId: req.user.id,
       sessionCount: assessmentSessionIds?.length || 0,
@@ -1378,20 +1381,20 @@ app.post('/api/merged-pdf/bulk-download', authenticateJWT, async (req, res) => {
           Bucket: process.env.MINIO_BUCKET_NAME,
           Key: mergedDoc.s3Key
         });
-        
+
         const response = await s3.send(command);
         const buffer = await streamToBuffer(response.Body);
-        
+
         // Create safe filename for ZIP
-        const safeName = mergedDoc.candidateEmail ? 
-          mergedDoc.candidateEmail.replace(/[^a-zA-Z0-9@.]/g, '_') : 
+        const safeName = mergedDoc.candidateEmail ?
+          mergedDoc.candidateEmail.replace(/[^a-zA-Z0-9@.]/g, '_') :
           `Candidate_${i + 1}`;
-        
+
         const zipFilename = `${safeName}_merged_${mergedDoc.generatedAt.toISOString().split('T')[0]}.pdf`;
-        
+
         // Add to ZIP
         zip.file(zipFilename, buffer);
-        
+
         successCount++;
         downloadResults.push({
           documentId: mergedDoc._id,
@@ -1401,9 +1404,9 @@ app.post('/api/merged-pdf/bulk-download', authenticateJWT, async (req, res) => {
           candidateEmail: mergedDoc.candidateEmail,
           jobTitle: mergedDoc.jobTitle
         });
-        
+
         console.log(`✅ [MERGED PDF BULK] Document added to ZIP: ${zipFilename}`);
-        
+
       } catch (error) {
         console.error(`❌ [MERGED PDF BULK] Failed to process document ${mergedDoc._id}:`, error);
         failureCount++;
@@ -1427,12 +1430,12 @@ app.post('/api/merged-pdf/bulk-download', authenticateJWT, async (req, res) => {
 
     // Generate ZIP buffer
     console.log('📦 [MERGED PDF BULK] Generating ZIP file...');
-    const zipBuffer = await zip.generateAsync({ 
+    const zipBuffer = await zip.generateAsync({
       type: 'nodebuffer',
       compression: 'DEFLATE',
       compressionOptions: { level: 6 }
     });
-    
+
     console.log('✅ [MERGED PDF BULK] ZIP file generated:', {
       sizeBytes: zipBuffer.length,
       sizeMB: (zipBuffer.length / 1024 / 1024).toFixed(2)
@@ -1447,18 +1450,18 @@ app.post('/api/merged-pdf/bulk-download', authenticateJWT, async (req, res) => {
       ContentType: 'application/zip',
       ContentDisposition: `attachment; filename="bulk_merged_pdfs_${new Date().toISOString().split('T')[0]}.zip"`
     });
-    
+
     await s3.send(zipUploadCommand);
-    
+
     // Generate signed download URL
     const downloadCommand = new GetObjectCommand({
       Bucket: process.env.MINIO_BUCKET_NAME,
       Key: zipKey,
       ResponseContentDisposition: `attachment; filename="bulk_merged_pdfs_${new Date().toISOString().split('T')[0]}.zip"`
     });
-    
+
     const downloadUrl = await getSignedUrl(s3, downloadCommand, { expiresIn: 3600 }); // 1 hour
-    
+
     console.log('🎉 [MERGED PDF BULK] Bulk download completed successfully:', {
       successCount,
       failureCount,
@@ -1480,7 +1483,7 @@ app.post('/api/merged-pdf/bulk-download', authenticateJWT, async (req, res) => {
 
   } catch (error) {
     console.error('❌ [MERGED PDF BULK] Bulk download failed:', error);
-    
+
     let errorMessage = 'Failed to create bulk merged PDF download';
     if (error.message.includes('timeout')) {
       errorMessage = 'Download timeout - too many files or network issues';
@@ -1489,7 +1492,7 @@ app.post('/api/merged-pdf/bulk-download', authenticateJWT, async (req, res) => {
     } else if (error.message.includes('AccessDenied')) {
       errorMessage = 'Access denied to some merged PDF files';
     }
-    
+
     res.status(500).json({
       success: false,
       error: errorMessage,
@@ -1504,18 +1507,18 @@ app.get('/api/job-descriptions/:jobDescriptionId', authenticateJWT, verifyOwners
   try {
     const { jobDescriptionId } = req.params;
     const jobDescription = await JobDescription.findById(jobDescriptionId);
-    
+
     if (!jobDescription) {
       return res.status(404).json({ error: 'Job description not found.' });
     }
     const command = new GetObjectCommand({
       Bucket: process.env.MINIO_BUCKET_NAME,
       Key: jobDescription.s3Key,
-      ResponseContentDisposition: req.query.download 
-      ? `attachment; filename="${jobDescription.filename}"` 
-      : undefined
+      ResponseContentDisposition: req.query.download
+        ? `attachment; filename="${jobDescription.filename}"`
+        : undefined
     });
-    
+
     const url = await getSignedUrl(s3, command); // 5 minutes
     res.status(200).json({ url });
   } catch (error) {
@@ -1532,7 +1535,7 @@ app.get('/api/job-descriptions', authenticateJWT, async (req, res) => {
     const jds = await JobDescription.find({ user: req.user.id })
       .sort({ uploadedAt: -1 })
       .select('title filename uploadedAt');
-    
+
     res.status(200).json(jds);
   } catch (error) {
     console.error('Error fetching job descriptions:', error);
@@ -1555,7 +1558,7 @@ app.get('/api/job-descriptions/:id/content', authenticateJWT, verifyOwnership(Jo
 
     const url = await getSignedUrl(s3, command);
     const response = await axios.get(url, { responseType: 'arraybuffer' });
-    
+
     res.status(200).send(response.data);
   } catch (error) {
     console.error('Error fetching JD content:', error);
@@ -1643,12 +1646,12 @@ app.post('/api/schedule-test', authenticateJWT, upload.fields([{ name: 'resume' 
     const resumeFile = files.resume[0];
     const resumeHash = calculateHash(resumeFile.buffer);
     let resumeDoc = await Resume.findOne({ hash: resumeHash });
-    
+
     if (!resumeDoc) {
       console.log('📤 Uploading new resume to S3...');
       const resumeS3Key = `resumes/${Date.now()}_${resumeFile.originalname}`;
       await uploadToS3(resumeFile.buffer, resumeS3Key, 'application/pdf');
-      
+
       resumeDoc = new Resume({
         title: resumeFile.originalname,
         s3Key: resumeS3Key,
@@ -1667,12 +1670,12 @@ app.post('/api/schedule-test', authenticateJWT, upload.fields([{ name: 'resume' 
     const jdFile = files.job_description[0];
     const jdHash = calculateHash(jdFile.buffer);
     let jdDoc = await JobDescription.findOne({ hash: jdHash });
-    
+
     if (!jdDoc) {
       console.log('📤 Uploading new JD to S3...');
       const jdS3Key = `job_descriptions/${Date.now()}_${jdFile.originalname}`;
       await uploadToS3(jdFile.buffer, jdS3Key, 'application/pdf');
-      
+
       jdDoc = new JobDescription({
         title: req.body.job_description_title || jdFile.originalname,
         s3Key: jdS3Key,
@@ -1783,8 +1786,8 @@ app.post('/api/schedule-test', authenticateJWT, upload.fields([{ name: 'resume' 
       stack: error.stack,
       processingTime: `${totalTime}ms`
     });
-    
-    res.status(500).json({ 
+
+    res.status(500).json({
       error: 'Failed to schedule test',
       details: error.message,
       processingTime: `${totalTime}ms`
@@ -1837,9 +1840,9 @@ app.get('/api/scheduled-tests/:id', authenticateJWT, async (req, res) => {
       _id: req.params.id,
       user: req.user.id
     })
-    .populate('resumeId')
-    .populate('jobDescriptionId')
-    .populate('assessmentSession');
+      .populate('resumeId')
+      .populate('jobDescriptionId')
+      .populate('assessmentSession');
 
     if (!scheduledTest) {
       return res.status(404).json({ error: 'Scheduled test not found' });
@@ -1860,19 +1863,19 @@ app.get('/api/scheduled-tests/:id', authenticateJWT, async (req, res) => {
 app.get('/api/scheduled-tests/by-assessment-session/:assessmentSessionId', authenticateJWT, async (req, res) => {
   try {
     const { assessmentSessionId } = req.params;
-    
+
     const scheduledTest = await ScheduledTest.findOne({
       assessmentSession: assessmentSessionId,
       user: req.user.id
     })
-    .populate('resumeId')
-    .populate('jobDescriptionId')
-    .populate('assessmentSession');
+      .populate('resumeId')
+      .populate('jobDescriptionId')
+      .populate('assessmentSession');
 
     if (!scheduledTest) {
-      return res.status(404).json({ 
-        success: false, 
-        error: 'Scheduled test not found for this assessment session' 
+      return res.status(404).json({
+        success: false,
+        error: 'Scheduled test not found for this assessment session'
       });
     }
 
@@ -1883,9 +1886,9 @@ app.get('/api/scheduled-tests/by-assessment-session/:assessmentSessionId', authe
 
   } catch (error) {
     console.error('Error fetching scheduled test by assessment session:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: 'Failed to fetch scheduled test' 
+    res.status(500).json({
+      success: false,
+      error: 'Failed to fetch scheduled test'
     });
   }
 });
@@ -1980,7 +1983,7 @@ app.get('/api/validate-scheduled-assessment/:token', async (req, res) => {
     }
 
     const now = new Date();
-    
+
     // Check if test has already been completed
     if (scheduledTest.status === 'completed') {
       return res.status(410).json({
@@ -1989,12 +1992,12 @@ app.get('/api/validate-scheduled-assessment/:token', async (req, res) => {
         code: 'ALREADY_COMPLETED'
       });
     }
-    
+
     // Check if test has expired
     if (now > scheduledTest.expiresAt) {
       scheduledTest.status = 'expired';
       await scheduledTest.save();
-      
+
       return res.status(410).json({
         valid: false,
         error: 'Assessment link has expired',
@@ -2175,11 +2178,11 @@ app.get('/api/candidates/segmented', authenticateJWT, async (req, res) => {
     });
 
     // Segment the enriched responses
-    const recent = enrichedResponses.filter(candidate => 
+    const recent = enrichedResponses.filter(candidate =>
       new Date(candidate.createdAt) >= oneWeekAgo
     );
 
-    const history = enrichedResponses.filter(candidate => 
+    const history = enrichedResponses.filter(candidate =>
       new Date(candidate.createdAt) < oneWeekAgo
     );
 
@@ -2351,14 +2354,14 @@ const calculateHash = (buffer) => {
 const checkSubscription = async (req, res, next) => {
   try {
     const user = await User.findById(req.user.id);
-    
+
     // Admins bypass all checks
     if (user.isAdmin) return next();
 
     // Check if subscription exists and is active
     if (!user.subscription || !user.subscription.isActive) {
-      return res.status(403).json({ 
-        message: 'Subscription inactive. Please contact admin.' 
+      return res.status(403).json({
+        message: 'Subscription inactive. Please contact admin.'
       });
     }
 
@@ -2368,8 +2371,8 @@ const checkSubscription = async (req, res, next) => {
       if (user.subscription.plan === 'paid') {
         await downgradeToTrial(user._id);
       }
-      return res.status(403).json({ 
-        message: 'Subscription expired. Please renew your plan.' 
+      return res.status(403).json({
+        message: 'Subscription expired. Please renew your plan.'
       });
     }
 
@@ -2414,7 +2417,7 @@ async function downgradeToTrial(userId) {
 const checkUsageLimits = (type) => async (req, res, next) => {
   try {
     const user = await User.findById(req.user.id);
-    
+
     // Skip all checks for admin
     if (user.isAdmin) return next();
 
@@ -2425,22 +2428,22 @@ const checkUsageLimits = (type) => async (req, res, next) => {
 
     // Check if subscription exists and is active
     if (!user.subscription || !user.subscription.isActive) {
-      return res.status(403).json({ 
-        message: 'Subscription inactive. Please contact admin.' 
+      return res.status(403).json({
+        message: 'Subscription inactive. Please contact admin.'
       });
     }
 
     // Check if expired
     if (user.subscription.expiresAt && new Date() > user.subscription.expiresAt) {
-      return res.status(403).json({ 
-        message: 'Subscription expired. Please renew your plan.' 
+      return res.status(403).json({
+        message: 'Subscription expired. Please renew your plan.'
       });
     }
 
     // Check usage against limits
     if (user.subscription.limits && user.usage[type] >= user.subscription.limits[type]) {
-      return res.status(403).json({ 
-        message: `You've reached your ${type} limit for your current plan.` 
+      return res.status(403).json({
+        message: `You've reached your ${type} limit for your current plan.`
       });
     }
 
@@ -2476,9 +2479,9 @@ app.post('/api/validate-jd', authenticateJWT, upload.single('job_description'), 
     // Check if file is provided
     if (!req.file) {
       console.log('❌ JD Validation Failed: No file provided');
-      return res.status(400).json({ 
-        success: false, 
-        error: 'Job description file is required.' 
+      return res.status(400).json({
+        success: false,
+        error: 'Job description file is required.'
       });
     }
 
@@ -2488,9 +2491,9 @@ app.post('/api/validate-jd', authenticateJWT, upload.single('job_description'), 
         receivedType: req.file.mimetype,
         expectedType: 'application/pdf'
       });
-      return res.status(400).json({ 
-        success: false, 
-        error: 'Only PDF files are allowed for job descriptions.' 
+      return res.status(400).json({
+        success: false,
+        error: 'Only PDF files are allowed for job descriptions.'
       });
     }
 
@@ -2500,9 +2503,9 @@ app.post('/api/validate-jd', authenticateJWT, upload.single('job_description'), 
         fileSize: req.file.size,
         maxSize: 25 * 1024 * 1024
       });
-      return res.status(400).json({ 
-        success: false, 
-        error: 'File size should be less than 25MB.' 
+      return res.status(400).json({
+        success: false,
+        error: 'File size should be less than 25MB.'
       });
     }
 
@@ -2533,11 +2536,11 @@ app.post('/api/validate-jd', authenticateJWT, upload.single('job_description'), 
       filename: req.file.originalname,
       contentType: req.file.mimetype
     });
-    
+
     console.log('📦 FormData prepared with job description file');
 
     console.log('📤 Sending request to JD_VALIDATOR API...');
-    
+
     const validatorResponse = await axios.post(
       process.env.JD_VALIDATOR,
       formData,
@@ -2563,7 +2566,7 @@ app.post('/api/validate-jd', authenticateJWT, upload.single('job_description'), 
       nestedDataKeys: (validatorResponse.data && validatorResponse.data.data) ? Object.keys(validatorResponse.data.data) : [],
       fullResponse: process.env.NODE_ENV === 'development' ? validatorResponse.data : 'hidden in production'
     });
-    
+
     if (!validatorResponse.data) {
       console.log('❌ JD_VALIDATOR API returned no data');
       return res.status(500).json({
@@ -2571,7 +2574,7 @@ app.post('/api/validate-jd', authenticateJWT, upload.single('job_description'), 
         error: 'No data received from JD validation service'
       });
     }
-    
+
     if (!validatorResponse.data.success) {
       console.log('❌ JD_VALIDATOR API returned error:', validatorResponse.data);
       return res.status(500).json({
@@ -2580,7 +2583,7 @@ app.post('/api/validate-jd', authenticateJWT, upload.single('job_description'), 
         details: validatorResponse.data
       });
     }
-    
+
     if (!validatorResponse.data.data) {
       console.log('❌ JD_VALIDATOR API returned no validation data:', validatorResponse.data);
       return res.status(500).json({
@@ -2595,14 +2598,14 @@ app.post('/api/validate-jd', authenticateJWT, upload.single('job_description'), 
       success: true,
       data: validatorResponse.data.data // Extract the actual data object
     };
-    
+
     console.log('✅ JD Validation Successful, sending response:', {
       isValid: responsePayload.data?.validation?.isValid,
       suitabilityScore: responsePayload.data?.validation?.suitabilityScore,
       hasValidation: !!(responsePayload.data && responsePayload.data.validation),
       validationKeys: (responsePayload.data && responsePayload.data.validation) ? Object.keys(responsePayload.data.validation) : []
     });
-    
+
     res.status(200).json(responsePayload);
   } catch (error) {
     console.error('❌ JD Validation Error:', {
@@ -2613,7 +2616,7 @@ app.post('/api/validate-jd', authenticateJWT, upload.single('job_description'), 
       responseStatusText: error.response?.statusText,
       responseData: error.response?.data
     });
-    
+
     // Handle specific error cases
     if (error.response) {
       // The request was made and the server responded with a status code
@@ -2622,7 +2625,7 @@ app.post('/api/validate-jd', authenticateJWT, upload.single('job_description'), 
         statusText: error.response.statusText,
         data: error.response.data
       });
-      
+
       return res.status(error.response.status).json({
         success: false,
         error: error.response.data?.error || 'JD validation failed',
@@ -2631,7 +2634,7 @@ app.post('/api/validate-jd', authenticateJWT, upload.single('job_description'), 
     } else if (error.request) {
       // The request was made but no response was received
       console.log('⏰ No response received from JD_VALIDATOR API');
-      
+
       return res.status(500).json({
         success: false,
         error: 'No response from JD validation service'
@@ -2639,7 +2642,7 @@ app.post('/api/validate-jd', authenticateJWT, upload.single('job_description'), 
     } else {
       // Something happened in setting up the request
       console.log('🔧 Error setting up request to JD_VALIDATOR API');
-      
+
       return res.status(500).json({
         success: false,
         error: 'Failed to validate job description',
@@ -2649,7 +2652,7 @@ app.post('/api/validate-jd', authenticateJWT, upload.single('job_description'), 
   }
 });
 
-app.post('/api/submit',authenticateJWT,checkSubscription,checkUsageLimits('jdUploads'),checkUsageLimits('resumeUploads'), upload.fields([{ name: 'resumes' }, { name: 'job_description' }]), async (req, res) => {
+app.post('/api/submit', authenticateJWT, checkSubscription, checkUsageLimits('jdUploads'), checkUsageLimits('resumeUploads'), upload.fields([{ name: 'resumes' }, { name: 'job_description' }]), async (req, res) => {
   let duplicateCount = 0;
   try {
     const { files } = req;
@@ -2674,7 +2677,7 @@ app.post('/api/submit',authenticateJWT,checkSubscription,checkUsageLimits('jdUpl
           ContentType: 'application/pdf'
         };
         await s3.send(new PutObjectCommand(jdS3Params));
-        
+
         jobDescDoc = new JobDescription({
           title: jobDescription.originalname,
           s3Key: jdS3Params.Key, // Store the S3 key
@@ -2699,13 +2702,13 @@ app.post('/api/submit',authenticateJWT,checkSubscription,checkUsageLimits('jdUpl
             ContentType: 'application/pdf'
           };
           await s3.send(new PutObjectCommand(resumeS3Params));
-          
+
           resumeDoc = new Resume({
             title: resume.originalname,
             s3Key: resumeS3Params.Key, // Store the S3 key
             filename: resume.originalname,
             hash: resumeHash,
-              user: req.user.id
+            user: req.user.id
           });
           await resumeDoc.save();
         }
@@ -2730,27 +2733,27 @@ app.post('/api/submit',authenticateJWT,checkSubscription,checkUsageLimits('jdUpl
 
           if (apiResponse.data && apiResponse.data['POST Response']) {
             const savedResponse = new ApiResponse({
-  resumeId: resumeDoc._id,
-  jobDescriptionId: jobDescDoc._id,
-  matchingResult: apiResponse.data['POST Response'],
-  hash: `${resumeHash}-${jdHash}`,
-  user: req.user.id
-});
-await savedResponse.save();  // <-- Candidate consent is default false
+              resumeId: resumeDoc._id,
+              jobDescriptionId: jobDescDoc._id,
+              matchingResult: apiResponse.data['POST Response'],
+              hash: `${resumeHash}-${jdHash}`,
+              user: req.user.id
+            });
+            await savedResponse.save();  // <-- Candidate consent is default false
 
-// ✅ SEND CANDIDATE EMAIL HERE (with link to give consent)
-const extractedEmail = apiResponse.data['POST Response']?.[0]?.["Resume Data"]?.email;
+            // ✅ SEND CANDIDATE EMAIL HERE (with link to give consent)
+            const extractedEmail = apiResponse.data['POST Response']?.[0]?.["Resume Data"]?.email;
 
-if (extractedEmail) {
-  await sendConsentEmail(extractedEmail, savedResponse._id);
-  console.log(`📨 Sending consent email to: ${extractedEmail}`);
+            if (extractedEmail) {
+              await sendConsentEmail(extractedEmail, savedResponse._id);
+              console.log(`📨 Sending consent email to: ${extractedEmail}`);
 
-} else {
-  console.warn(`⚠️ No email found in API response for ${resume.originalname}`);
-}
+            } else {
+              console.warn(`⚠️ No email found in API response for ${resume.originalname}`);
+            }
 
 
-emitApiResponseUpdate(savedResponse);
+            emitApiResponseUpdate(savedResponse);
 
 
             results.push({
@@ -2764,38 +2767,38 @@ emitApiResponseUpdate(savedResponse);
         }
       }
     }
-// Update usage
-      await User.findByIdAndUpdate(req.user.id, {
-        $inc: {
-          'usage.jdUploads': files.job_description.length,
-          'usage.resumeUploads': files.resumes.length
+    // Update usage
+    await User.findByIdAndUpdate(req.user.id, {
+      $inc: {
+        'usage.jdUploads': files.job_description.length,
+        'usage.resumeUploads': files.resumes.length
+      }
+    });
+
+    // Automatically create job post in external system (non-blocking)
+    if (files.job_description && files.job_description.length > 0) {
+      const jobDescriptionFile = files.job_description[0];
+      // Run in background without blocking the response
+      setImmediate(async () => {
+        try {
+          console.log('🔄 Starting automatic job posting in background...');
+          const jobPostResult = await handleAutomaticJobPosting(
+            jobDescriptionFile.buffer,
+            jobDescriptionFile.originalname,
+            req.user.email
+          );
+
+          if (jobPostResult.success) {
+            console.log(`✅ Automatic job post created: ${jobPostResult.publicUrl}`);
+          } else {
+            console.log(`⚠️ Automatic job post not created: ${jobPostResult.reason || jobPostResult.error}`);
+          }
+        } catch (error) {
+          console.error('❌ Error in automatic job posting background process:', error.message);
         }
       });
-      
-      // Automatically create job post in external system (non-blocking)
-      if (files.job_description && files.job_description.length > 0) {
-        const jobDescriptionFile = files.job_description[0];
-        // Run in background without blocking the response
-        setImmediate(async () => {
-          try {
-            console.log('🔄 Starting automatic job posting in background...');
-            const jobPostResult = await handleAutomaticJobPosting(
-              jobDescriptionFile.buffer, 
-              jobDescriptionFile.originalname, 
-              req.user.email
-            );
-            
-            if (jobPostResult.success) {
-              console.log(`✅ Automatic job post created: ${jobPostResult.publicUrl}`);
-            } else {
-              console.log(`⚠️ Automatic job post not created: ${jobPostResult.reason || jobPostResult.error}`);
-            }
-          } catch (error) {
-            console.error('❌ Error in automatic job posting background process:', error.message);
-          }
-        });
-      }
-      
+    }
+
     console.log(`Total duplicates found: ${duplicateCount}`); // Log the total number of duplicates
     res.status(200).json({ message: 'Files processed and stored successfully.', results, duplicateCount });
   } catch (error) {
@@ -2804,15 +2807,15 @@ emitApiResponseUpdate(savedResponse);
       stack: error.stack,
       timestamp: new Date().toISOString()
     });
-    res.status(500).json({ 
+    res.status(500).json({
       error: 'File processing failed',
       details: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 });
-                                /*
-                                  This is related to the test platfrom
-                                */
+/*
+  This is related to the test platfrom
+*/
 
 // Add this to your startup checks:
 function ensureCleanTempDir() {
@@ -2834,7 +2837,7 @@ const evaluateTextResponse = async (question, answer) => {
       question,
       answer
     });
-    
+
     return response.data;
   } catch (error) {
     console.error('Text evaluation failed:', error);
@@ -2855,11 +2858,11 @@ async function calculateAndStoreScores(sessionId) {
     const session = await AssessmentSession.findById(sessionId);
     const totalQuestions = session.voiceQuestions.length;
 
-     // Filter out skipped/invalid answers
-    const validAnswers = answers.filter(a => a.valid && 
-      a.processingStatus === 'completed' && 
+    // Filter out skipped/invalid answers
+    const validAnswers = answers.filter(a => a.valid &&
+      a.processingStatus === 'completed' &&
       a.audioAnalysis?.status === 'completed');
-    
+
     // Audio scores (0 for invalid/skipped)
     const audioScores = session.voiceQuestions.map(q => {
       const answer = answers.find(a => a.questionId === q.id);
@@ -2885,7 +2888,7 @@ async function calculateAndStoreScores(sessionId) {
     // Update TestResult
     await TestResult.findOneAndUpdate(
       { assessmentSession: sessionId },
-      { 
+      {
         audioScore: audioAverage,
         textScore: textAverage,
         videoScore,
@@ -2910,7 +2913,7 @@ async function calculateAndStoreScores(sessionId) {
 const analyzeAudio = async (s3Keys) => {
   try {
     const form = new FormData();
-    
+
     for (const key of s3Keys) {
       const { stream } = await getS3ReadStream(key);
       form.append('audios', stream, {
@@ -2970,7 +2973,7 @@ async function checkPendingScores() {
       $or: [
         { 'testResult.audioScore': { $exists: false } },
         { 'testResult.videoScore': { $exists: false } },
-        { 'testResult.combinedScore': { $exists: false }}
+        { 'testResult.combinedScore': { $exists: false } }
       ]
     }).populate('voiceAnswers');
 
@@ -2978,7 +2981,7 @@ async function checkPendingScores() {
       if (session.voiceAnswers?.some(a => a.audioAnalysis?.status === 'completed')) {
         await calculateAndStoreAudioScore(session._id);
       }
-      
+
       // Check for video score
       await calculateAndStoreVideoScore(session._id);
       await calculateAndStoreScores(session._id);
@@ -2996,7 +2999,7 @@ async function getS3ReadStream(s3Key) {
     });
 
     const response = await s3.send(command);
-    
+
     if (!response.Body) {
       throw new Error('No body in S3 response');
     }
@@ -3029,7 +3032,7 @@ async function validateAudio(audioBuffer) {
   try {
     const MIN_AUDIO_LENGTH = 2000; // 2 seconds minimum
     const SILENCE_THRESHOLD = 0.01; // More sensitive threshold
-    
+
     // Check buffer size first
     if (!audioBuffer || audioBuffer.length < MIN_AUDIO_LENGTH) {
       return { valid: false, reason: 'Audio too short' };
@@ -3039,19 +3042,19 @@ async function validateAudio(audioBuffer) {
     try {
       const audioContext = new (window.AudioContext || window.webkitAudioContext)();
       const buffer = await audioContext.decodeAudioData(audioBuffer.buffer.slice(0));
-      
+
       // Calculate RMS (Root Mean Square) for better silence detection
       let sum = 0;
       const channelData = buffer.getChannelData(0);
       const sampleSize = Math.min(channelData.length, 44100); // Check first second
-      
+
       for (let i = 0; i < sampleSize; i++) {
         sum += channelData[i] * channelData[i];
       }
-      
+
       const rms = Math.sqrt(sum / sampleSize);
-      
-      return { 
+
+      return {
         valid: rms > SILENCE_THRESHOLD,
         reason: rms > SILENCE_THRESHOLD ? '' : 'No speech detected (silent audio)'
       };
@@ -3060,12 +3063,12 @@ async function validateAudio(audioBuffer) {
       const view = new DataView(audioBuffer.buffer);
       let sum = 0;
       const sampleSize = Math.min(audioBuffer.length, 44100 * 2); // Check first second (16-bit samples)
-      
+
       for (let i = 0; i < sampleSize; i += 2) {
         const sample = view.getInt16(i, true);
         sum += sample * sample;
       }
-      
+
       const rms = Math.sqrt(sum / (sampleSize / 2)) / 32768;
       return {
         valid: rms > SILENCE_THRESHOLD,
@@ -3109,7 +3112,7 @@ async function processTranscription(answerId) {
     try {
       const { stream: audioStream } = await getS3ReadStream(answer.audioPath);
       audioBuffer = await streamToBuffer(audioStream);
-      
+
       // Check if audio buffer is empty or too small
       if (!audioBuffer || audioBuffer.length < 1024) {
         throw new Error('Audio file is too small or empty');
@@ -3130,7 +3133,7 @@ async function processTranscription(answerId) {
     const validation = await validateAudio(audioBuffer);
     if (!validation.valid) {
       const isSilentAudio = validation.reason.includes('silent');
-      
+
       await VoiceAnswer.findByIdAndUpdate(answerId, {
         processingStatus: isSilentAudio ? 'completed' : 'failed',
         answer: isSilentAudio ? '[SILENT_AUDIO]' : undefined,
@@ -3141,7 +3144,7 @@ async function processTranscription(answerId) {
           'textEvaluation.skipReason': isSilentAudio ? 'Silent audio - no speech detected' : undefined
         }
       });
-      
+
       console.log(`Audio validation ${isSilentAudio ? 'completed (silent)' : 'failed'} for answer ${answerId}`);
       return;
     }
@@ -3157,8 +3160,8 @@ async function processTranscription(answerId) {
     let response;
     try {
       response = await axios.post(
-        `${process.env.WHISPER_API_URL}/transcribe`, 
-        form, 
+        `${process.env.WHISPER_API_URL}/transcribe`,
+        form,
         {
           headers: form.getHeaders(),
 
@@ -3221,10 +3224,10 @@ async function processTranscription(answerId) {
         });
 
         const evaluation = await evaluateTextResponse(
-          updatedAnswer.question, 
+          updatedAnswer.question,
           cleanedText
         );
-        
+
         await VoiceAnswer.findByIdAndUpdate(answerId, {
           textEvaluation: {
             metrics: evaluation,
@@ -3259,7 +3262,7 @@ async function processTranscription(answerId) {
 // Enhanced text cleaning function
 function cleanTranscriptionText(rawText) {
   if (!rawText) return '';
-  
+
   // Handle Whisper's silent/empty indicators
   const silentIndicators = ['[silence]', '[empty]', '[no speech]', '...'];
   if (silentIndicators.some(indicator => rawText.toLowerCase().includes(indicator))) {
@@ -3268,9 +3271,9 @@ function cleanTranscriptionText(rawText) {
 
   // Split into lines and filter out metadata
   const lines = rawText.split('\n').filter(line => {
-    return !line.includes('Detecting language') && 
-           !line.includes('Detected language') && 
-           line.trim() !== '';
+    return !line.includes('Detecting language') &&
+      !line.includes('Detected language') &&
+      line.trim() !== '';
   });
 
   // Remove timestamps and special characters
@@ -3284,7 +3287,7 @@ function cleanTranscriptionText(rawText) {
 
   // Join and final clean
   let result = cleanedLines.join(' ').trim();
-  
+
   // Final check for empty content
   if (result === '' || result.length < 2) {
     return '';
@@ -3356,7 +3359,7 @@ async function processBackgroundTasks(recording) {
 async function activateScheduledTests() {
   try {
     const now = new Date();
-    
+
     // Find tests that should be activated
     const testsToActivate = await ScheduledTest.find({
       status: 'scheduled',
@@ -3418,7 +3421,7 @@ async function activateScheduledTests() {
 
       } catch (error) {
         console.error(`Failed to activate scheduled test ${scheduledTest._id}:`, error);
-        
+
         // Mark as failed
         scheduledTest.status = 'failed';
         await scheduledTest.save();
@@ -3434,7 +3437,7 @@ async function activateScheduledTests() {
 async function expireScheduledTests() {
   try {
     const now = new Date();
-    
+
     // Find tests that should be expired
     const result = await ScheduledTest.updateMany(
       {
@@ -3459,7 +3462,7 @@ async function expireScheduledTests() {
 async function generateQuestionsForScheduledTest(scheduledTestId) {
   try {
     console.log(`\n🧠 Generating questions for scheduled test: ${scheduledTestId}`);
-    
+
     const scheduledTest = await ScheduledTest.findById(scheduledTestId)
       .populate('resumeId')
       .populate('jobDescriptionId')
@@ -3526,7 +3529,7 @@ async function generateQuestionsForScheduledTest(scheduledTestId) {
       });
       await assessmentSession.save();
       console.log('✅ AssessmentSession created:', assessmentSession._id);
-      
+
       // Link the assessment session to the scheduled test
       scheduledTest.assessmentSession = assessmentSession._id;
     }
@@ -3621,7 +3624,7 @@ async function sendScheduledTestConfirmationEmail(scheduledTest) {
 
   try {
     console.log('📧 Preparing email content...');
-    
+
     const mailOptions = {
       from: `"SkillMatrix Assessment" <${process.env.EMAIL_USER}>`,
       to: scheduledTest.candidateEmail,
@@ -3728,7 +3731,7 @@ async function sendScheduledTestConfirmationEmail(scheduledTest) {
     });
 
     const emailResult = await transporter.sendMail(mailOptions);
-    
+
     const emailTime = Date.now() - emailStartTime;
     console.log('\n✅ ===== EMAIL SENT SUCCESSFULLY =====');
     console.log('📧 Email Result:', {
@@ -3737,7 +3740,7 @@ async function sendScheduledTestConfirmationEmail(scheduledTest) {
       processingTime: `${emailTime}ms`,
       timestamp: new Date().toISOString()
     });
-    
+
     return {
       success: true,
       messageId: emailResult.messageId,
@@ -3754,7 +3757,7 @@ async function sendScheduledTestConfirmationEmail(scheduledTest) {
       processingTime: `${emailTime}ms`,
       timestamp: new Date().toISOString()
     });
-    
+
     throw new Error(`Email sending failed: ${error.message}`);
   }
 }
@@ -3763,7 +3766,7 @@ async function sendScheduledTestConfirmationEmail(scheduledTest) {
 async function sendReminderEmails() {
   try {
     const reminderTime = new Date(Date.now() + 60 * 60 * 1000); // 1 hour from now
-    
+
     const testsNeedingReminder = await ScheduledTest.find({
       status: 'scheduled',
       reminderSent: false,
@@ -3801,10 +3804,10 @@ async function sendReminderEmails() {
         };
 
         await transporter.sendMail(mailOptions);
-        
+
         test.reminderSent = true;
         await test.save();
-        
+
         console.log(`Sent reminder email to: ${test.candidateEmail}`);
 
       } catch (error) {
@@ -3820,7 +3823,7 @@ async function sendReminderEmails() {
 // Combined scheduled test processor
 async function processScheduledTests() {
   console.log('🔄 Processing scheduled tests...');
-  
+
   try {
     await Promise.all([
       activateScheduledTests(),
@@ -3851,7 +3854,7 @@ async function analyzeVideoFile(file) {
   try {
     const form = new FormData();
     const fileStream = Readable.from(file.buffer);
-    
+
     form.append('video', fileStream, {
       filename: file.originalname,
       contentType: file.mimetype,
@@ -3882,7 +3885,7 @@ async function analyzeVideoFile(file) {
 }
 async function calculateAndStoreVideoScore(sessionId) {
   try {
-    const recording = await Recording.findOne({ 
+    const recording = await Recording.findOne({
       assessmentSession: sessionId,
       'videoAnalysis.status': 'completed'
     });
@@ -3911,8 +3914,8 @@ async function calculateAndStoreVideoScore(sessionId) {
 
 const s3 = new S3Client({
   region: process.env.MINIO_REGION || 'us-east-1',
-  endpoint: process.env.MINIO_SECURE === 'true' || process.env.MINIO_SECURE === 'True' 
-    ? `https://${process.env.MINIO_ENDPOINT}` 
+  endpoint: process.env.MINIO_SECURE === 'true' || process.env.MINIO_SECURE === 'True'
+    ? `https://${process.env.MINIO_ENDPOINT}`
     : `http://${process.env.MINIO_ENDPOINT}`,
   credentials: {
     accessKeyId: process.env.MINIO_ACCESS_KEY,
@@ -3937,13 +3940,13 @@ const testMinIOConnection = async () => {
     console.log(`📡 Endpoint: ${process.env.MINIO_SECURE === 'true' || process.env.MINIO_SECURE === 'True' ? 'https://' : 'http://'}${process.env.MINIO_ENDPOINT}`);
     console.log(`🔒 Secure: ${process.env.MINIO_SECURE}`);
     console.log(`🪣 Bucket: ${process.env.MINIO_BUCKET_NAME}`);
-    
+
     // Test connection by listing bucket contents (this will fail gracefully if bucket doesn't exist)
     const command = new GetObjectCommand({
       Bucket: process.env.MINIO_BUCKET_NAME,
       Key: 'test-connection' // This file doesn't need to exist
     });
-    
+
     try {
       await s3.send(command);
     } catch (error) {
@@ -4038,28 +4041,28 @@ async function uploadToS3(fileData, key, contentType, bucket = process.env.MINIO
 app.post('/api/generate-questions', async (req, res) => {
   try {
     console.log('Request body:', req.body);
-    
+
     const { resumeId, jobDescriptionId, skipMatching = false } = req.body;
-    
+
     // Validate input
     if (!resumeId || !jobDescriptionId) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         success: false,
-        error: 'Both resumeId and jobDescriptionId are required' 
+        error: 'Both resumeId and jobDescriptionId are required'
       });
     }
-    
+
     if (!mongoose.Types.ObjectId.isValid(resumeId)) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         success: false,
-        error: 'Invalid resumeId format' 
+        error: 'Invalid resumeId format'
       });
     }
-    
+
     if (!mongoose.Types.ObjectId.isValid(jobDescriptionId)) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         success: false,
-        error: 'Invalid jobDescriptionId format' 
+        error: 'Invalid jobDescriptionId format'
       });
     }
 
@@ -4070,22 +4073,22 @@ app.post('/api/generate-questions', async (req, res) => {
     ]);
 
     if (!resume || !resume.s3Key) {
-      return res.status(404).json({ 
+      return res.status(404).json({
         success: false,
-        error: 'Resume not found or has no file' 
+        error: 'Resume not found or has no file'
       });
     }
     if (!jd || !jd.s3Key) {
-      return res.status(404).json({ 
+      return res.status(404).json({
         success: false,
-        error: 'Job description not found or has no file' 
+        error: 'Job description not found or has no file'
       });
     }
 
     // For scheduled tests, skip resume-JD matching and go directly to question generation
     if (skipMatching) {
       console.log('Skipping resume-JD matching for scheduled test...');
-      
+
       // Get readable streams directly from S3 for question generation only
       const [resumeStream, jdStream] = await Promise.all([
         getS3ReadStream(resume.s3Key),
@@ -4106,7 +4109,7 @@ app.post('/api/generate-questions', async (req, res) => {
       });
 
       console.log('Streaming files directly from S3 to question generation API (scheduled test)...');
-      
+
       const headers = {
         ...form.getHeaders(),
         'Content-Length': form.getLengthSync()
@@ -4122,7 +4125,7 @@ app.post('/api/generate-questions', async (req, res) => {
       // Parse and return questions
       const apiResponse = response.data;
       let questions = [];
-      
+
       if (apiResponse && apiResponse['POST Response'] && apiResponse['POST Response'][0]) {
         const mcqData = apiResponse['POST Response'][0]['MCQ with answers'];
         if (mcqData && mcqData.questions) {
@@ -4141,7 +4144,7 @@ app.post('/api/generate-questions', async (req, res) => {
         correctAnswer: q.answer
       }));
 
-      return res.json({ 
+      return res.json({
         success: true,
         questions: formattedQuestions,
         resumeTitle: resume.title,
@@ -4172,7 +4175,7 @@ app.post('/api/generate-questions', async (req, res) => {
     });
 
     console.log('Streaming files directly from S3 to question generation API...');
-    
+
     // Get headers with synchronous length since we have knownLength
     const headers = {
       ...form.getHeaders(),
@@ -4184,13 +4187,13 @@ app.post('/api/generate-questions', async (req, res) => {
       headers,
       maxContentLength: Infinity,
       maxBodyLength: Infinity,
-    
+
     });
 
     // Parse the API response correctly
     const apiResponse = response.data;
     let questions = [];
-    
+
     // Handle the specific response format we're seeing
     if (apiResponse && apiResponse['POST Response'] && apiResponse['POST Response'][0]) {
       const mcqData = apiResponse['POST Response'][0]['MCQ with answers'];
@@ -4211,7 +4214,7 @@ app.post('/api/generate-questions', async (req, res) => {
       correctAnswer: q.answer
     }));
 
-    res.json({ 
+    res.json({
       success: true,
       questions: formattedQuestions,
       resumeTitle: resume.title,
@@ -4222,7 +4225,7 @@ app.post('/api/generate-questions', async (req, res) => {
 
   } catch (error) {
     console.error('Question generation failed:', error);
-    
+
     let errorMessage = 'Failed to generate questions';
     if (error.code === 'ECONNABORTED') {
       errorMessage = 'Question generation timed out';
@@ -4231,8 +4234,8 @@ app.post('/api/generate-questions', async (req, res) => {
     } else if (error.response?.data?.message) {
       errorMessage = error.response.data.message;
     }
-    
-    res.status(500).json({ 
+
+    res.status(500).json({
       success: false,
       error: errorMessage,
       details: process.env.NODE_ENV === 'development' ? error.message : undefined
@@ -4242,57 +4245,57 @@ app.post('/api/generate-questions', async (req, res) => {
 app.post('/api/generate-voice-questions', async (req, res) => {
   try {
     const { jobDescriptionId } = req.body;
-    
+
     if (!jobDescriptionId) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         success: false,
-        error: 'jobDescriptionId is required' 
+        error: 'jobDescriptionId is required'
       });
     }
 
     const jd = await JobDescription.findById(jobDescriptionId);
     if (!jd || !jd.s3Key) {
-      return res.status(404).json({ 
+      return res.status(404).json({
         success: false,
-        error: 'Job description not found or has no file' 
+        error: 'Job description not found or has no file'
       });
     }
 
-  // Get stream directly from S3
-  const jdStream = await getS3ReadStream(jd.s3Key);
+    // Get stream directly from S3
+    const jdStream = await getS3ReadStream(jd.s3Key);
 
-  const form = new FormData();
-  form.append('job_description', jdStream.stream, {
-    filename: jd.filename || 'job_description.pdf',
-    contentType: jdStream.contentType || 'application/pdf',
-    knownLength: jdStream.contentLength
-  });
+    const form = new FormData();
+    form.append('job_description', jdStream.stream, {
+      filename: jd.filename || 'job_description.pdf',
+      contentType: jdStream.contentType || 'application/pdf',
+      knownLength: jdStream.contentLength
+    });
 
-  console.log('Streaming JD directly from S3 to voice question API...');
+    console.log('Streaming JD directly from S3 to voice question API...');
 
-  const headers = {
-    ...form.getHeaders(),
-    'Content-Length': form.getLengthSync(),
-    'Accept': 'application/json'
-  };
+    const headers = {
+      ...form.getHeaders(),
+      'Content-Length': form.getLengthSync(),
+      'Accept': 'application/json'
+    };
 
-  const response = await axios.post(process.env.VOICE_GENERATION_API, form, {
-    headers,
-    maxContentLength: Infinity,
-    maxBodyLength: Infinity,
-  });
+    const response = await axios.post(process.env.VOICE_GENERATION_API, form, {
+      headers,
+      maxContentLength: Infinity,
+      maxBodyLength: Infinity,
+    });
 
     // Validate API response structure
-    if (!response.data || 
-        !response.data['POST Response'] || 
-        !response.data['POST Response'][0] || 
-        !response.data['POST Response'][0]['Questions'] || 
-        !response.data['POST Response'][0]['Questions'].questions) {
+    if (!response.data ||
+      !response.data['POST Response'] ||
+      !response.data['POST Response'][0] ||
+      !response.data['POST Response'][0]['Questions'] ||
+      !response.data['POST Response'][0]['Questions'].questions) {
       throw new Error('Invalid response structure from voice question API');
     }
 
     const apiQuestions = response.data['POST Response'][0]['Questions'].questions;
-    
+
     if (!Array.isArray(apiQuestions)) {
       throw new Error('Questions should be an array');
     }
@@ -4307,7 +4310,7 @@ app.post('/api/generate-voice-questions', async (req, res) => {
       throw new Error('No valid questions generated');
     }
 
-    res.json({ 
+    res.json({
       success: true,
       questions: formattedQuestions,
       jdTitle: jd.title,
@@ -4316,10 +4319,10 @@ app.post('/api/generate-voice-questions', async (req, res) => {
 
   } catch (error) {
     console.error('Voice question generation failed:', error);
-    
+
     let errorMessage = 'Failed to generate voice questions';
     let errorDetails = null;
-    
+
     if (error.response) {
       // The request was made and the server responded with a status code
       console.error('API response error:', error.response.status, error.response.data);
@@ -4334,8 +4337,8 @@ app.post('/api/generate-voice-questions', async (req, res) => {
       console.error('Request setup error:', error.message);
       errorMessage = error.message;
     }
-    
-    res.status(500).json({ 
+
+    res.status(500).json({
       success: false,
       error: errorMessage,
       details: process.env.NODE_ENV === 'development' ? errorDetails : undefined
@@ -4346,86 +4349,86 @@ app.post('/api/generate-voice-questions', async (req, res) => {
 // Add this new endpoint after the existing question generation endpoints
 app.post('/api/create-custom-assessment', authenticateJWT, async (req, res) => {
   try {
-    const { 
-      candidateEmail, 
-      jobTitle, 
-      resumeId, 
+    const {
+      candidateEmail,
+      jobTitle,
+      resumeId,
       jobDescriptionId,
       customMcqQuestions,
       customVoiceQuestions
     } = req.body;
-    
+
     // Validate input
     if (!candidateEmail || !jobTitle || !resumeId || !jobDescriptionId) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         success: false,
-        error: 'All required fields must be provided' 
+        error: 'All required fields must be provided'
       });
     }
-    
+
     // Validate email format
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (!emailRegex.test(candidateEmail)) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         success: false,
-        error: 'Invalid email format' 
+        error: 'Invalid email format'
       });
     }
-    
+
     // Validate custom MCQ questions format
     if (!customMcqQuestions || !Array.isArray(customMcqQuestions)) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         success: false,
-        error: 'Custom MCQ questions array is required' 
+        error: 'Custom MCQ questions array is required'
       });
     }
-    
+
     // Validate exactly 10 MCQ questions
     if (customMcqQuestions.length !== 10) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         success: false,
-        error: 'Exactly 10 MCQ questions are required' 
+        error: 'Exactly 10 MCQ questions are required'
       });
     }
-    
+
     // Validate each MCQ question
     for (let i = 0; i < customMcqQuestions.length; i++) {
       const q = customMcqQuestions[i];
       if (!q.question || !q.options || !Array.isArray(q.options) || q.options.length !== 4 || !q.correctAnswer) {
-        return res.status(400).json({ 
+        return res.status(400).json({
           success: false,
-          error: `Invalid MCQ question format at index ${i}. Each MCQ must have exactly 4 options.` 
+          error: `Invalid MCQ question format at index ${i}. Each MCQ must have exactly 4 options.`
         });
       }
     }
-    
+
     // Validate custom voice questions format
     if (!customVoiceQuestions || !Array.isArray(customVoiceQuestions)) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         success: false,
-        error: 'Custom voice questions array is required' 
+        error: 'Custom voice questions array is required'
       });
     }
-    
+
     // Validate exactly 5 voice questions
     if (customVoiceQuestions.length !== 5) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         success: false,
-        error: 'Exactly 5 voice questions are required' 
+        error: 'Exactly 5 voice questions are required'
       });
     }
-    
+
     // Validate each voice question
     for (let i = 0; i < customVoiceQuestions.length; i++) {
       const q = customVoiceQuestions[i];
       if (!q.question) {
-        return res.status(400).json({ 
+        return res.status(400).json({
           success: false,
-          error: `Invalid voice question format at index ${i}` 
+          error: `Invalid voice question format at index ${i}`
         });
       }
     }
-    
+
     // Verify resume and JD exist
     const [resume, jd] = await Promise.all([
       Resume.findById(resumeId),
@@ -4438,7 +4441,7 @@ app.post('/api/create-custom-assessment', authenticateJWT, async (req, res) => {
     if (!jd || !jd.s3Key) {
       return res.status(404).json({ error: 'Job description not found in S3' });
     }
-    
+
     // Transform custom MCQ questions to match our format
     const formattedMcqQuestions = customMcqQuestions.map((q, index) => ({
       id: `cq-${index}-${Date.now()}`,
@@ -4446,17 +4449,17 @@ app.post('/api/create-custom-assessment', authenticateJWT, async (req, res) => {
       options: q.options,
       correctAnswer: q.correctAnswer
     }));
-    
+
     // Transform custom voice questions to match our format
     const formattedVoiceQuestions = customVoiceQuestions.map((q, index) => ({
       id: `cv-${index}-${Date.now()}`,
       question: q.question
     }));
-    
+
     // Create session with custom questions
     const token = require('crypto').randomBytes(20).toString('hex');
     const testLink = `${process.env.FRONTEND_URL}/assessment/${token}`;
-    
+
     const session = new AssessmentSession({
       user: req.user.id,
       candidateEmail,
@@ -4469,12 +4472,12 @@ app.post('/api/create-custom-assessment', authenticateJWT, async (req, res) => {
       jobDescriptionId
     });
     await session.save();
-    
+
     // Increment assessment count
     await User.findByIdAndUpdate(req.user.id, {
       $inc: { 'usage.assessments': 1 }
     });
-    
+
     // Email options
     const mailOptions = {
       from: `"Assessment System" <${process.env.EMAIL_USER}>`,
@@ -4535,28 +4538,28 @@ app.post('/api/create-custom-assessment', authenticateJWT, async (req, res) => {
         </html>
       `
     };
-    
+
     // Send email
     try {
       await transporter.sendMail(mailOptions);
       console.log(`Custom assessment email sent to ${candidateEmail}`);
-      
-      res.status(200).json({ 
+
+      res.status(200).json({
         success: true,
-        message: 'Custom assessment created and email sent successfully!', 
+        message: 'Custom assessment created and email sent successfully!',
         sessionId: session._id,
         testLink
       });
     } catch (emailError) {
       console.error('Email sending failed:', emailError);
-      
+
       // Delete the session if email fails
       await AssessmentSession.findByIdAndDelete(session._id);
       await User.findByIdAndUpdate(req.user.id, {
         $inc: { 'usage.assessments': -1 }
       });
-      
-      res.status(500).json({ 
+
+      res.status(500).json({
         success: false,
         error: 'Failed to send assessment email',
         details: process.env.NODE_ENV === 'development' ? emailError.message : undefined
@@ -4564,7 +4567,7 @@ app.post('/api/create-custom-assessment', authenticateJWT, async (req, res) => {
     }
   } catch (error) {
     console.error('Error in create-custom-assessment:', error);
-    res.status(500).json({ 
+    res.status(500).json({
       success: false,
       error: 'Failed to create custom assessment',
       details: process.env.NODE_ENV === 'development' ? error.message : undefined
@@ -4577,7 +4580,7 @@ app.post('/api/create-custom-assessment', authenticateJWT, async (req, res) => {
 // Updated send-test-link endpoint with NodeMailer
 app.post('/api/send-test-link', authenticateJWT, checkSubscription, checkUsageLimits('assessments'), async (req, res) => {
   const { candidateEmail, jobTitle, resumeId, jobDescriptionId, questions, voiceQuestions } = req.body;
-  
+
   // Enhanced validation
   if (!questions || !Array.isArray(questions)) {
     return res.status(400).json({ error: 'Questions array is required' });
@@ -4620,13 +4623,13 @@ app.post('/api/send-test-link', authenticateJWT, checkSubscription, checkUsageLi
     });
     await session.save();
 
-     // Increment assessment count
+    // Increment assessment count
     await User.findByIdAndUpdate(req.user.id, {
       $inc: { 'usage.assessments': 1 }
     });
 
 
-  
+
 
     // Email options
     const mailOptions = {
@@ -4692,19 +4695,19 @@ app.post('/api/send-test-link', authenticateJWT, checkSubscription, checkUsageLi
     try {
       await transporter.sendMail(mailOptions);
       console.log(`Email sent to ${candidateEmail}`);
-      
-      res.status(200).json({ 
+
+      res.status(200).json({
         success: true,
-        message: 'Assessment link sent successfully!', 
+        message: 'Assessment link sent successfully!',
         sessionId: session._id,
         testLink // Return the link for debugging
       });
     } catch (emailError) {
       console.error('Email sending failed:', emailError);
-      
+
       // Delete the session if email fails
       await AssessmentSession.findByIdAndDelete(session._id);
-        await User.findByIdAndUpdate(req.user.id, {
+      await User.findByIdAndUpdate(req.user.id, {
         $inc: { 'usage.assessments': 1 }
       });
       // Extract detailed error message
@@ -4712,8 +4715,8 @@ app.post('/api/send-test-link', authenticateJWT, checkSubscription, checkUsageLi
       if (emailError.response) {
         errorMessage = emailError.response;
       }
-      
-      res.status(500).json({ 
+
+      res.status(500).json({
         success: false,
         error: errorMessage,
         details: process.env.NODE_ENV === 'development' ? emailError : undefined
@@ -4721,7 +4724,7 @@ app.post('/api/send-test-link', authenticateJWT, checkSubscription, checkUsageLi
     }
   } catch (error) {
     console.error('Error in send-test-link:', error);
-    res.status(500).json({ 
+    res.status(500).json({
       error: 'Failed to create assessment session',
       details: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
@@ -4732,18 +4735,18 @@ app.post('/api/send-test-link', authenticateJWT, checkSubscription, checkUsageLi
 // New endpoint to start assessment recording
 app.post('/api/start-assessment-recording', async (req, res) => {
   const { token } = req.body;
-  
+
   try {
     const session = await AssessmentSession.findOneAndUpdate(
       { testLink: `${process.env.FRONTEND_URL}/assessment/${token}` },
       { status: 'in-progress', startedAt: new Date() },
       { new: true }
     );
-    
+
     if (!session) {
       return res.status(404).json({ error: 'Assessment session not found.' });
     }
-    
+
     res.status(200).json(session);
   } catch (error) {
     console.error('Error starting assessment:', error);
@@ -4758,7 +4761,7 @@ app.post('/api/complete-assessment', async (req, res) => {
   const { token, score, recordingId, answers } = req.body;
   // Validate input
   if (!token || score === undefined) {
-    return res.status(400).json({ 
+    return res.status(400).json({
       error: 'Token and score are required',
       code: 'INVALID_INPUT'
     });
@@ -4776,33 +4779,33 @@ app.post('/api/complete-assessment', async (req, res) => {
     );
 
     if (!session) {
-      return res.status(410).json({ 
+      return res.status(410).json({
         error: 'Assessment already completed, expired, or not found',
         code: 'SESSION_INVALID'
       });
     }
 
 
-     // 2. Update questions with user answers if provided
+    // 2. Update questions with user answers if provided
     if (answers && Array.isArray(answers)) {
       const updatedQuestions = session.questions.map(q => {
         const answer = answers.find(a => a.id === q.id);
         return answer ? { ...q, userAnswer: answer.userAnswer } : q;
       });
-      
+
       session.questions = updatedQuestions;
-    
-      
+
+
       await AssessmentSession.findByIdAndUpdate(session._id, {
         $set: { questions: updatedQuestions }
       });
     }
-      // 2. Update the recording with session reference if not already set
-      if (recordingId) {
-        await Recording.findByIdAndUpdate(recordingId, {
-          assessmentSession: session._id
-        });
-      }
+    // 2. Update the recording with session reference if not already set
+    if (recordingId) {
+      await Recording.findByIdAndUpdate(recordingId, {
+        assessmentSession: session._id
+      });
+    }
 
     // 2. Create test result with atomic operations
     const testResult = await TestResult.findOneAndUpdate(
@@ -4872,7 +4875,7 @@ app.post('/api/complete-assessment', async (req, res) => {
 
   } catch (error) {
     console.error('Assessment completion error:', error);
-    
+
     // Revert any partial changes
     await AssessmentSession.updateOne(
       { testLink: `${process.env.FRONTEND_URL}/assessment/${token}` },
@@ -4919,17 +4922,17 @@ app.patch('/api/update-answer/:token', async (req, res) => {
 app.post('/api/generate-report/:sessionId', authenticateJWT, verifyOwnership(AssessmentSession), async (req, res) => {
   try {
     const { sessionId } = req.params;
-    
+
     // Generate and store report
     const report = await generateAssessmentReport(sessionId, req.user.id);
-    
+
     // Get signed URL for download
     const command = new GetObjectCommand({
       Bucket: process.env.MINIO_BUCKET_NAME,
       Key: report.s3Key
     });
     const downloadUrl = await getSignedUrl(s3, command, { expiresIn: 3600 });
-    
+
     // Send email notification
     const session = await AssessmentSession.findById(sessionId);
     await sendReportEmail(
@@ -4938,7 +4941,7 @@ app.post('/api/generate-report/:sessionId', authenticateJWT, verifyOwnership(Ass
       session.candidateEmail,
       session.jobTitle
     );
-    
+
     res.json({
       success: true,
       message: 'Report generated and sent successfully',
@@ -4959,13 +4962,13 @@ app.post('/api/generate-report/:sessionId', authenticateJWT, verifyOwnership(Ass
 app.get('/api/validate-assessment/:token', async (req, res) => {
   try {
     const { token } = req.params;
-    
+
     // First check if it's a scheduled test
     const scheduledTest = await ScheduledTest.findOne({ token });
     if (scheduledTest) {
       // Use the scheduled test validation logic
       const now = new Date();
-      
+
       // Check if test has already been completed
       if (scheduledTest.status === 'completed') {
         return res.status(410).json({
@@ -4974,11 +4977,11 @@ app.get('/api/validate-assessment/:token', async (req, res) => {
           status: 'completed'
         });
       }
-      
+
       if (now > scheduledTest.expiresAt) {
         scheduledTest.status = 'expired';
         await scheduledTest.save();
-        
+
         return res.status(410).json({
           valid: false,
           error: 'Assessment link has expired',
@@ -5025,8 +5028,8 @@ app.get('/api/validate-assessment/:token', async (req, res) => {
     }).populate('testResult');
 
     if (!session) {
-      return res.status(404).json({ 
-        valid: false, 
+      return res.status(404).json({
+        valid: false,
         error: 'Assessment not found',
         status: 'not-found'
       });
@@ -5034,8 +5037,8 @@ app.get('/api/validate-assessment/:token', async (req, res) => {
 
     // Check if assessment has already been completed
     if (session.status === 'completed' || session.testResult?.status === 'completed') {
-      return res.status(410).json({ 
-        valid: false, 
+      return res.status(410).json({
+        valid: false,
         error: 'This assessment has already been completed successfully.',
         status: 'completed'
       });
@@ -5045,15 +5048,15 @@ app.get('/api/validate-assessment/:token', async (req, res) => {
     const hoursSinceCreation = (new Date() - session.createdAt) / (1000 * 60 * 60);
     if (hoursSinceCreation > 24) {
       await AssessmentSession.findByIdAndUpdate(session._id, { status: 'expired' });
-      return res.status(410).json({ 
-        valid: false, 
+      return res.status(410).json({
+        valid: false,
         error: 'This assessment link has expired',
         status: 'expired'
       });
     }
 
-    res.json({ 
-      valid: true, 
+    res.json({
+      valid: true,
       session: {
         ...session.toObject(),
         type: 'immediate'
@@ -5061,8 +5064,8 @@ app.get('/api/validate-assessment/:token', async (req, res) => {
     });
   } catch (error) {
     console.error('Validation error:', error);
-    res.status(500).json({ 
-      valid: false, 
+    res.status(500).json({
+      valid: false,
       error: 'Validation failed',
       status: 'error'
     });
@@ -5074,12 +5077,12 @@ app.get('/api/assessment-questions/:token', async (req, res) => {
     const session = await AssessmentSession.findOne({
       testLink: `${process.env.FRONTEND_URL}/assessment/${req.params.token}`
     }).select('questions voiceQuestions');
-    
+
     if (!session) {
       return res.status(404).json({ error: 'Assessment session not found' });
     }
-    
-    res.json({ 
+
+    res.json({
       questions: session.questions,
       voiceQuestions: session.voiceQuestions
     });
@@ -5122,7 +5125,7 @@ app.get('/api/recording/:id/play', async (req, res) => {
       Bucket: process.env.MINIO_BUCKET_NAME,
       Key: recording.videoPath
     });
-    
+
     const url = await getSignedUrl(s3, command);
     res.json({ url });
   } catch (error) {
@@ -5136,24 +5139,24 @@ app.get('/api/recording/:id/play', async (req, res) => {
 app.get('/api/video/:videoKey', authenticateJWT, async (req, res) => {
   try {
     const { videoKey } = req.params;
-    
+
     // Validate video key format - more flexible pattern
     if (!videoKey || !videoKey.match(/^session_[a-f0-9]+_(camera|screen)_[0-9]+\.webm$/)) {
       console.log('Invalid video key format:', videoKey);
       return res.status(400).json({ error: 'Invalid video key format' });
     }
-    
+
     // Construct the full S3 key
     const s3Key = `video/${videoKey}`;
-    
+
     // Generate signed URL
     const command = new GetObjectCommand({
       Bucket: process.env.MINIO_BUCKET_NAME,
       Key: s3Key
     });
-    
+
     const url = await getSignedUrl(s3, command, { expiresIn: 3600 }); // 1 hour expiry
-    
+
     res.json({ url });
   } catch (error) {
     console.error('Error serving video:', error);
@@ -5165,24 +5168,24 @@ app.get('/api/video/:videoKey', authenticateJWT, async (req, res) => {
 app.get('/api/screen/:screenKey', authenticateJWT, async (req, res) => {
   try {
     const { screenKey } = req.params;
-    
+
     // Validate screen key format - more flexible pattern
     if (!screenKey || !screenKey.match(/^session_[a-f0-9]+_(camera|screen)_[0-9]+\.webm$/)) {
       console.log('Invalid screen key format:', screenKey);
       return res.status(400).json({ error: 'Invalid screen key format' });
     }
-    
+
     // Construct the full S3 key
     const s3Key = `video/${screenKey}`;
-    
+
     // Generate signed URL
     const command = new GetObjectCommand({
       Bucket: process.env.MINIO_BUCKET_NAME,
       Key: s3Key
     });
-    
+
     const url = await getSignedUrl(s3, command, { expiresIn: 3600 }); // 1 hour expiry
-    
+
     res.json({ url });
   } catch (error) {
     console.error('Error serving screen recording:', error);
@@ -5193,22 +5196,22 @@ app.get('/api/screen/:screenKey', authenticateJWT, async (req, res) => {
 app.get('/api/video/:videoKey', authenticateJWT, async (req, res) => {
   try {
     const { videoKey } = req.params;
-    
+
     // Security check - ensure the video belongs to a recording associated with the user
     const recording = await Recording.findOne({
       videoPath: { $regex: videoKey + '$' },
       assessmentSession: { $in: await AssessmentSession.find({ user: req.user.id }).distinct('_id') }
     });
-    
+
     if (!recording) {
       return res.status(404).json({ error: 'Video not found' });
     }
-    
+
     const command = new GetObjectCommand({
       Bucket: process.env.MINIO_BUCKET_NAME,
       Key: recording.videoPath
     });
-    
+
     const url = await getSignedUrl(s3, command, { expiresIn: 3600 }); // 1 hour expiration
     res.json({ url });
   } catch (error) {
@@ -5221,23 +5224,23 @@ app.get('/api/video/:videoKey', authenticateJWT, async (req, res) => {
 app.get('/api/video/:videoKey/download', authenticateJWT, async (req, res) => {
   try {
     const { videoKey } = req.params;
-    
+
     // Security check - ensure the video belongs to a recording associated with the user
     const recording = await Recording.findOne({
       videoPath: { $regex: videoKey + '$' },
       assessmentSession: { $in: await AssessmentSession.find({ user: req.user.id }).distinct('_id') }
     });
-    
+
     if (!recording) {
       return res.status(404).json({ error: 'Video not found' });
     }
-    
+
     const command = new GetObjectCommand({
       Bucket: process.env.MINIO_BUCKET_NAME,
       Key: recording.videoPath,
       ResponseContentDisposition: `attachment; filename="${videoKey}"`
     });
-    
+
     const url = await getSignedUrl(s3, command, { expiresIn: 3600 }); // 1 hour expiration
     res.json({ url });
   } catch (error) {
@@ -5250,22 +5253,22 @@ app.get('/api/video/:videoKey/download', authenticateJWT, async (req, res) => {
 app.get('/api/screen/:screenKey', authenticateJWT, async (req, res) => {
   try {
     const { screenKey } = req.params;
-    
+
     // Security check - ensure the screen recording belongs to a recording associated with the user
     const recording = await Recording.findOne({
       screenPath: { $regex: screenKey + '$' },
       assessmentSession: { $in: await AssessmentSession.find({ user: req.user.id }).distinct('_id') }
     });
-    
+
     if (!recording) {
       return res.status(404).json({ error: 'Screen recording not found' });
     }
-    
+
     const command = new GetObjectCommand({
       Bucket: process.env.MINIO_BUCKET_NAME,
       Key: recording.screenPath
     });
-    
+
     const url = await getSignedUrl(s3, command, { expiresIn: 3600 }); // 1 hour expiration
     res.json({ url });
   } catch (error) {
@@ -5278,23 +5281,23 @@ app.get('/api/screen/:screenKey', authenticateJWT, async (req, res) => {
 app.get('/api/screen/:screenKey/download', authenticateJWT, async (req, res) => {
   try {
     const { screenKey } = req.params;
-    
+
     // Security check - ensure the screen recording belongs to a recording associated with the user
     const recording = await Recording.findOne({
       screenPath: { $regex: screenKey + '$' },
       assessmentSession: { $in: await AssessmentSession.find({ user: req.user.id }).distinct('_id') }
     });
-    
+
     if (!recording) {
       return res.status(404).json({ error: 'Screen recording not found' });
     }
-    
+
     const command = new GetObjectCommand({
       Bucket: process.env.MINIO_BUCKET_NAME,
       Key: recording.screenPath,
       ResponseContentDisposition: `attachment; filename="${screenKey}"`
     });
-    
+
     const url = await getSignedUrl(s3, command, { expiresIn: 3600 }); // 1 hour expiration
     res.json({ url });
   } catch (error) {
@@ -5307,22 +5310,22 @@ app.get('/api/screen/:screenKey/download', authenticateJWT, async (req, res) => 
 app.get('/api/audio/:audioKey', authenticateJWT, async (req, res) => {
   try {
     const { audioKey } = req.params;
-    
+
     // Security check - ensure the audio belongs to a voice answer associated with the user
     const voiceAnswer = await VoiceAnswer.findOne({
       audioPath: { $regex: audioKey + '$' },
       assessmentSession: { $in: await AssessmentSession.find({ user: req.user.id }).distinct('_id') }
     });
-    
+
     if (!voiceAnswer) {
       return res.status(404).json({ error: 'Audio not found' });
     }
-    
+
     const command = new GetObjectCommand({
       Bucket: process.env.MINIO_BUCKET_NAME,
       Key: voiceAnswer.audioPath
     });
-    
+
     const url = await getSignedUrl(s3, command, { expiresIn: 3600 }); // 1 hour expiration
     res.json({ url });
   } catch (error) {
@@ -5335,23 +5338,23 @@ app.get('/api/audio/:audioKey', authenticateJWT, async (req, res) => {
 app.get('/api/audio/:audioKey/download', authenticateJWT, async (req, res) => {
   try {
     const { audioKey } = req.params;
-    
+
     // Security check - ensure the audio belongs to a voice answer associated with the user
     const voiceAnswer = await VoiceAnswer.findOne({
       audioPath: { $regex: audioKey + '$' },
       assessmentSession: { $in: await AssessmentSession.find({ user: req.user.id }).distinct('_id') }
     });
-    
+
     if (!voiceAnswer) {
       return res.status(404).json({ error: 'Audio not found' });
     }
-    
+
     const command = new GetObjectCommand({
       Bucket: process.env.MINIO_BUCKET_NAME,
       Key: voiceAnswer.audioPath,
       ResponseContentDisposition: `attachment; filename="${audioKey}"`
     });
-    
+
     const url = await getSignedUrl(s3, command, { expiresIn: 3600 }); // 1 hour expiration
     res.json({ url });
   } catch (error) {
@@ -5362,14 +5365,14 @@ app.get('/api/audio/:audioKey/download', authenticateJWT, async (req, res) => {
 
 // Fetch Test Results
 // Updated test-results endpoint
-app.get('/api/test-results',authenticateJWT, async (req, res) => {
+app.get('/api/test-results', authenticateJWT, async (req, res) => {
   try {
-   
- const query = { user: req.user.id };
+
+    const query = { user: req.user.id };
     if (req.user.isAdmin) {
       delete query.user; // Admins see all results
     }
-    
+
     const testScores = await TestResult.find(query)
       .populate('assessmentSession')
       .sort({ createdAt: -1 });
@@ -5385,17 +5388,17 @@ app.get('/api/test-results',authenticateJWT, async (req, res) => {
 app.post('/api/start-voice-assessment', async (req, res) => {
   try {
     const { token } = req.body;
-    
+
     const session = await AssessmentSession.findOneAndUpdate(
       { testLink: `${process.env.FRONTEND_URL}/assessment/${token}` },
       { $set: { currentPhase: 'voice' } },
       { new: true }
     );
-    
+
     if (!session) {
       return res.status(404).json({ error: 'Session not found' });
     }
-    
+
     res.status(200).json(session);
   } catch (error) {
     console.error('Error starting voice assessment:', error);
@@ -5407,23 +5410,23 @@ app.post('/api/submit-voice-answer', (req, res) => {
   audioUpload(req, res, async (err) => {
     try {
       const { token, questionId, question, skipped, durationSec } = req.body;
-      
+
       // Error handling for upload
       if (err) {
         return res.status(400).json({ error: err.message });
       }
-      
+
       if (!req.file && !skipped) {
         return res.status(400).json({ error: 'No audio file uploaded' });
       }
 
-// Add these new endpoints after the existing recording endpoints
+      // Add these new endpoints after the existing recording endpoints
 
-// Find session
+      // Find session
       const session = await AssessmentSession.findOne({
         testLink: `${process.env.FRONTEND_URL}/assessment/${token}`
       });
-      
+
       if (!session) {
         return res.status(404).json({ error: 'Session not found' });
       }
@@ -5442,7 +5445,7 @@ app.post('/api/submit-voice-answer', (req, res) => {
         });
 
         await voiceAnswer.save();
-        return res.status(200).json({ 
+        return res.status(200).json({
           success: true,
           answerId: voiceAnswer._id,
           skipped: true
@@ -5473,10 +5476,10 @@ app.post('/api/submit-voice-answer', (req, res) => {
         try {
           // Create a fresh stream from the buffer
           const audioStream = Readable.from(req.file.buffer);
-          
+
           // Upload to S3 with explicit WAV MIME type
           await uploadToS3(audioStream, s3Key, 'audio/wav');
-          
+
           // Start transcription in background
           processTranscription(voiceAnswer._id).catch(transcriptionError => {
             console.error('Transcription processing failed:', transcriptionError);
@@ -5494,7 +5497,7 @@ app.post('/api/submit-voice-answer', (req, res) => {
 
       session.voiceAnswers.push(voiceAnswer._id);
       await session.save();
-      
+
       // Trigger audio analysis in background
       setTimeout(async () => {
         try {
@@ -5505,7 +5508,7 @@ app.post('/api/submit-voice-answer', (req, res) => {
 
           // Analyze audio
           const gradingResult = await analyzeAudio([voiceAnswer.audioPath]);
-          
+
           // Save analysis results
           await VoiceAnswer.findByIdAndUpdate(voiceAnswer._id, {
             audioAnalysis: {
@@ -5544,22 +5547,22 @@ app.post('/api/submit-voice-answer', (req, res) => {
         }
       }, 0);
 
-      res.status(200).json({ 
+      res.status(200).json({
         success: true,
         answerId: voiceAnswer._id,
-           valid: validation.valid,
+        valid: validation.valid,
         reason: validation.reason,
-    format: 'wav'
+        format: 'wav'
       });
-      
+
     } catch (error) {
       // Cleanup any leftover files
       if (req.file?.path && fs.existsSync(req.file.path)) {
         fs.unlinkSync(req.file.path);
       }
-      
+
       console.error('Voice answer submission error:', error);
-      res.status(500).json({ 
+      res.status(500).json({
         error: 'Failed to submit voice answer',
         details: process.env.NODE_ENV === 'development' ? error.message : undefined
       });
@@ -5598,8 +5601,8 @@ app.post('/api/complete-voice-assessment', async (req, res) => {
   try {
     const session = await AssessmentSession.findOneAndUpdate(
       { testLink: `${process.env.FRONTEND_URL}/assessment/${token}` },
-      {   
-        $set: { 
+      {
+        $set: {
           currentPhase: 'completed',
           status: 'completed',
           completedAt: new Date(),
@@ -5608,14 +5611,14 @@ app.post('/api/complete-voice-assessment', async (req, res) => {
       },
       { new: true }
     );
-    
+
     // Ensure the recording references the session
     if (recordingId) {
       await Recording.findByIdAndUpdate(recordingId, {
         assessmentSession: session._id
       });
     }
-    
+
     // Find and update the corresponding ScheduledTest if this is a scheduled assessment
     const scheduledTest = await ScheduledTest.findOne({ assessmentSession: session._id });
     if (scheduledTest) {
@@ -5624,7 +5627,7 @@ app.post('/api/complete-voice-assessment', async (req, res) => {
       await scheduledTest.save();
       console.log(`✅ Scheduled test ${scheduledTest._id} marked as completed`);
     }
-    
+
     // Non-blocking processing
     processAssessmentCompletion(session._id, session.user)
       .catch(err => console.error('Background processing error:', err));
@@ -5665,12 +5668,12 @@ async function processAssessmentCompletion(sessionId, userId) {
     });
 
     console.log('Successfully processed assessment:', sessionId);
-    
+
     // 4. AUTO-GENERATE MERGED PDF
     // Trigger merged PDF generation automatically after report completion
     try {
       console.log(`🔄 [AUTO MERGED PDF] Automatically generating merged PDF for session: ${sessionId}`);
-      
+
       // Generate merged PDF in background (don't block the response)
       generateMergedPDF(sessionId, userId).then((mergedResult) => {
         if (mergedResult.success) {
@@ -5682,12 +5685,12 @@ async function processAssessmentCompletion(sessionId, userId) {
         console.error(`❌ [AUTO MERGED PDF] Failed to auto-generate merged PDF for session ${sessionId}:`, mergedError.message);
         // Don't throw - this shouldn't fail the main report process
       });
-      
+
     } catch (autoMergeError) {
       console.error(`❌ [AUTO MERGED PDF] Error in auto-merge trigger for session ${sessionId}:`, autoMergeError.message);
       // Don't throw - this shouldn't fail the main report process
     }
-    
+
     return report;
   } catch (error) {
     // 4. Handle failures
@@ -5762,8 +5765,8 @@ app.post("/upload", upload.fields([{ name: "cameraFile" }, { name: "screenFile" 
     }
 
     const { assessmentToken } = req.body;
-    const session = await AssessmentSession.findOne({ 
-      testLink: `${process.env.FRONTEND_URL}/assessment/${assessmentToken}` 
+    const session = await AssessmentSession.findOne({
+      testLink: `${process.env.FRONTEND_URL}/assessment/${assessmentToken}`
     });
 
     if (!session) {
@@ -5774,9 +5777,9 @@ app.post("/upload", upload.fields([{ name: "cameraFile" }, { name: "screenFile" 
     const recording = new Recording({
       filename: req.files.cameraFile[0].originalname,
       assessmentSession: session._id,
-      videoAnalysis: { 
+      videoAnalysis: {
         status: 'processing',
-        startedAt: new Date() 
+        startedAt: new Date()
       }
     });
     await recording.save();
@@ -5829,7 +5832,7 @@ app.post("/upload", upload.fields([{ name: "cameraFile" }, { name: "screenFile" 
       await calculateAndStoreVideoScore(session._id);
       await calculateAndStoreScores(session._id);
 
-      res.status(200).json({ 
+      res.status(200).json({
         success: true,
         recordingId: recording._id,
         message: "Processing completed successfully",
@@ -5843,7 +5846,7 @@ app.post("/upload", upload.fields([{ name: "cameraFile" }, { name: "screenFile" 
         'videoAnalysis.error': processingError.message,
         'videoAnalysis.completedAt': new Date()
       });
-      res.status(500).json({ 
+      res.status(500).json({
         success: false,
         error: "Video processing failed",
         details: processingError.message
@@ -5852,7 +5855,7 @@ app.post("/upload", upload.fields([{ name: "cameraFile" }, { name: "screenFile" 
 
   } catch (err) {
     console.error("Upload error:", err);
-    res.status(500).json({ 
+    res.status(500).json({
       success: false,
       error: "File processing failed",
       details: process.env.NODE_ENV === 'development' ? err.message : undefined
@@ -5861,21 +5864,21 @@ app.post("/upload", upload.fields([{ name: "cameraFile" }, { name: "screenFile" 
 });
 
 // Get all voice answers for a specific assessment session
-app.get('/api/assessment-session/:sessionId/voice-answers',authenticateJWT, async (req, res) => {
+app.get('/api/assessment-session/:sessionId/voice-answers', authenticateJWT, async (req, res) => {
   try {
 
-      const session = await AssessmentSession.findOne({
+    const session = await AssessmentSession.findOne({
       _id: req.params.sessionId,
       user: req.user.id
     });
-    
+
     if (!session) {
       return res.status(404).json({ error: 'Session not found' });
     }
-    
+
     const answers = await VoiceAnswer.find({
       assessmentSession: req.params.sessionId
-      
+
     }).sort({ createdAt: 1 }); // Sort by creation time
 
     res.json(answers);
@@ -5909,17 +5912,17 @@ app.get('/api/assessment-session/:sessionId', authenticateJWT, async (req, res) 
     });
   } catch (error) {
     console.error('Error fetching assessment session:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: 'Failed to fetch assessment session' 
+    res.status(500).json({
+      success: false,
+      error: 'Failed to fetch assessment session'
     });
   }
 });
 
 // Get Combined score of all the test scores
 
-app.get('/api/assessment-session/:sessionId/full-results',authenticateJWT, async (req, res) => {
- try {
+app.get('/api/assessment-session/:sessionId/full-results', authenticateJWT, async (req, res) => {
+  try {
     const session = await AssessmentSession.findOne({
       _id: req.params.sessionId,
       user: req.user.id
@@ -5955,19 +5958,19 @@ app.post('/api/evaluate-answers/:sessionId', async (req, res) => {
     });
 
     // Process answers in parallel with rate limiting
-    const processingPromises = answers.map(answer => 
+    const processingPromises = answers.map(answer =>
       processVoiceAnswer(answer._id)
     );
-    
+
     await Promise.all(processingPromises);
 
-    res.json({ 
+    res.json({
       success: true,
       message: `Evaluation started for ${answers.length} answers`
     });
   } catch (error) {
     console.error('Error triggering evaluation:', error);
-    res.status(500).json({ 
+    res.status(500).json({
       success: false,
       error: 'Failed to start evaluation'
     });
@@ -5979,11 +5982,11 @@ app.post('/api/evaluate-answers/:sessionId', async (req, res) => {
 
 
 
-                                 /*login functionalities*/
+/*login functionalities*/
 
-                                        // Routes
+// Routes
 
-                                   // Register a new user
+// Register a new user
 
 const blockedDomains = process.env.BLOCKED_DOMAINS ? process.env.BLOCKED_DOMAINS.split(',') : [];
 
@@ -6004,7 +6007,7 @@ app.post('/login', async (req, res) => {
       if (!user.isEmailVerified) {
         return res.status(400).json({ message: 'Please verify your email first.' });
       }
-      
+
       if (!user.isApproved) {
         return res.status(400).json({ message: 'Your account is pending admin approval.' });
       }
@@ -6015,23 +6018,23 @@ app.post('/login', async (req, res) => {
     }
 
     const token = jwt.sign(
-      { 
-        id: user._id, 
+      {
+        id: user._id,
         isAdmin: user.isAdmin,
         email: user.email
-      }, 
-      JWT_SECRET, 
+      },
+      JWT_SECRET,
       { expiresIn: '1h' }
     );
 
-    res.cookie('token', token, { 
-      httpOnly: true, 
+    res.cookie('token', token, {
+      httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
       sameSite: 'strict'
     });
 
-    res.status(200).json({ 
-      message: 'Login successful.', 
+    res.status(200).json({
+      message: 'Login successful.',
       user: {
         id: user._id,
         email: user.email,
@@ -6047,22 +6050,22 @@ app.post('/login', async (req, res) => {
 
 // Register a new user with admin approval flow
 // Updated Register Endpoint with proper error handling and responses
-app.post( '/register',[
-    body('fullName').notEmpty().withMessage('Full name is required'),
-    body('email').isEmail().withMessage('Valid email is required'),
-    body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters'),
-    body('mobileNumber').notEmpty().withMessage('Mobile number is required'),
-    body('companyName').notEmpty().withMessage('Company name is required'),
-    body('designation').notEmpty().withMessage('Designation is required'),
-  ],
+app.post('/register', [
+  body('fullName').notEmpty().withMessage('Full name is required'),
+  body('email').isEmail().withMessage('Valid email is required'),
+  body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters'),
+  body('mobileNumber').notEmpty().withMessage('Mobile number is required'),
+  body('companyName').notEmpty().withMessage('Company name is required'),
+  body('designation').notEmpty().withMessage('Designation is required'),
+],
   async (req, res) => {
     try {
       const errors = validationResult(req);
       if (!errors.isEmpty()) {
-        return res.status(400).json({ 
+        return res.status(400).json({
           success: false,
           message: 'Validation failed',
-          errors: errors.array().map(err => err.msg) 
+          errors: errors.array().map(err => err.msg)
         });
       }
 
@@ -6071,18 +6074,18 @@ app.post( '/register',[
       const blockedDomains = process.env.BLOCKED_DOMAINS ? process.env.BLOCKED_DOMAINS.split(',') : [];
 
       if (blockedDomains.includes(emailDomain)) {
-        return res.status(400).json({ 
+        return res.status(400).json({
           success: false,
-          message: 'Personal email domains are not allowed. Please use your company email.' 
+          message: 'Personal email domains are not allowed. Please use your company email.'
         });
       }
 
       // Check if user already exists
       const existingUser = await User.findOne({ email });
       if (existingUser) {
-        return res.status(400).json({ 
+        return res.status(400).json({
           success: false,
-          message: 'User with this email already exists. Please login or use a different email.' 
+          message: 'User with this email already exists. Please login or use a different email.'
         });
       }
 
@@ -6097,16 +6100,16 @@ app.post( '/register',[
         designation,
         trialEnd: new Date(Date.now() + 24 * 60 * 60 * 1000), // 1-day trial
         subscription: {
-        plan: 'trial',
-        expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000), // 1-day trial
-        isActive: true,
-        limits: {
-        jdUploads: 1,
-        resumeUploads: 10,
-        assessments: 1
-      }
-    }
-  });
+          plan: 'trial',
+          expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000), // 1-day trial
+          isActive: true,
+          limits: {
+            jdUploads: 1,
+            resumeUploads: 10,
+            assessments: 1
+          }
+        }
+      });
 
       await user.save();
 
@@ -6114,8 +6117,8 @@ app.post( '/register',[
       const verificationToken = jwt.sign({ email }, JWT_SECRET, { expiresIn: '1h' });
       const verificationLink = `${process.env.BACKEND_URL}/verify-email?token=${verificationToken}`;
 
-    
-      
+
+
       // Send verification email to user
       try {
         await transporter.sendMail({
@@ -6151,7 +6154,7 @@ app.post( '/register',[
       try {
         const adminEmail = process.env.ADMIN_EMAIL || 'skillmatrixai@gmail.com';
         const adminDashboardLink = `${process.env.FRONTEND_URL}/dashboard/admin`;
-        
+
         await transporter.sendMail({
           from: `"SkillMatrix AI" <${process.env.EMAIL_USER}>`,
           to: adminEmail,
@@ -6183,14 +6186,14 @@ app.post( '/register',[
       }
 
       // Successful response
-      return res.status(201).json({ 
+      return res.status(201).json({
         success: true,
         message: 'Registration successful! Please check your email to verify your account. You will be notified once admin approves your registration.'
       });
 
     } catch (error) {
       console.error('Registration error:', error);
-      return res.status(500).json({ 
+      return res.status(500).json({
         success: false,
         message: 'An error occurred during registration. Please try again later.'
       });
@@ -6212,7 +6215,7 @@ const PasswordResetToken = mongoose.model('PasswordResetToken', PasswordResetTok
 const generateResetToken = () => crypto.randomBytes(32).toString('hex');
 
 // 1. Request Password Reset
-app.post('/api/forgot-password', 
+app.post('/api/forgot-password',
   body('email').isEmail().normalizeEmail(),
   async (req, res) => {
     const errors = validationResult(req);
@@ -6237,7 +6240,7 @@ app.post('/api/forgot-password',
 
       // Send email
       const resetLink = `${process.env.FRONTEND_URL}/reset-password?token=${token}&email=${encodeURIComponent(email)}`;
-      
+
       await transporter.sendMail({
         from: `"ATS Support" <${process.env.EMAIL_USER}>`,
         to: email,
@@ -6344,7 +6347,7 @@ app.get('/verify-email', async (req, res) => {
     return res.status(400).render('verifyError', { errorMessage: msg });
   }
 });
-                              
+
 // Admin dashboard (protected route)
 app.get('/admin', authenticateJWT, isAdmin, async (req, res) => {
   try {
@@ -6370,7 +6373,7 @@ app.put('/admin/update-subscription/:userId', authenticateJWT, isAdmin, async (r
       usage: { jdUploads: 0, resumeUploads: 0, assessments: 0 } // Reset usage
     };
 
-    switch(plan) {
+    switch (plan) {
       case 'trial':
         updateData.subscription.expiresAt = new Date(now.getTime() + 24 * 60 * 60 * 1000);
         updateData.subscription.limits = {
@@ -6398,12 +6401,12 @@ app.put('/admin/update-subscription/:userId', authenticateJWT, isAdmin, async (r
 
     const user = await User.findByIdAndUpdate(
       userId,
-      { 
+      {
         ...updateData,
-        $unset: { 
-          trialStart: "", 
-          trialEnd: "", 
-          isUnlimited: "" 
+        $unset: {
+          trialStart: "",
+          trialEnd: "",
+          isUnlimited: ""
         }
       },
       { new: true }
@@ -6411,10 +6414,10 @@ app.put('/admin/update-subscription/:userId', authenticateJWT, isAdmin, async (r
 
     res.status(200).json({ success: true, user });
   } catch (error) {
-    res.status(500).json({ 
+    res.status(500).json({
       success: false,
       message: 'Failed to update subscription',
-      error: error.message 
+      error: error.message
     });
   }
 });
@@ -6423,7 +6426,7 @@ app.post('/admin/approve-user/:userId', authenticateJWT, isAdmin, async (req, re
   try {
     const user = await User.findByIdAndUpdate(
       req.params.userId,
-      { 
+      {
         isApproved: true,
         trialStart: new Date(),
         trialEnd: new Date(Date.now() + 24 * 60 * 60 * 1000) // 1-day trial
@@ -6447,7 +6450,7 @@ app.post('/admin/approve-user/:userId', authenticateJWT, isAdmin, async (req, re
       `
     });
 
-    res.status(200).json({ 
+    res.status(200).json({
       message: 'User approved successfully.',
       user: {
         id: user._id,
@@ -6486,7 +6489,7 @@ app.get('/admin/dashboard', authenticateJWT, isAdmin, async (req, res) => {
       isApproved: false,
       isAdmin: false
     }).select('-password');
-    
+
     const stats = {
       totalUsers: users.length,
       pendingApproval: pendingUsers.length,
@@ -6494,7 +6497,7 @@ app.get('/admin/dashboard', authenticateJWT, isAdmin, async (req, res) => {
       adminUsers: users.filter(u => u.isAdmin).length
     };
 
-    res.status(200).json({ 
+    res.status(200).json({
       success: true,
       users,
       pendingUsers,
@@ -6502,9 +6505,9 @@ app.get('/admin/dashboard', authenticateJWT, isAdmin, async (req, res) => {
     });
   } catch (error) {
     console.error('Admin dashboard error:', error);
-    res.status(500).json({ 
+    res.status(500).json({
       success: false,
-      message: 'Failed to load admin dashboard data' 
+      message: 'Failed to load admin dashboard data'
     });
   }
 });
@@ -6514,20 +6517,20 @@ app.get('/admin/users/:id', authenticateJWT, isAdmin, async (req, res) => {
   try {
     const user = await User.findById(req.params.id).select('-password');
     if (!user) {
-      return res.status(404).json({ 
+      return res.status(404).json({
         success: false,
-        message: 'User not found' 
+        message: 'User not found'
       });
     }
-    res.status(200).json({ 
+    res.status(200).json({
       success: true,
-      user 
+      user
     });
   } catch (error) {
     console.error('Get user error:', error);
-    res.status(500).json({ 
+    res.status(500).json({
       success: false,
-      message: 'Failed to get user' 
+      message: 'Failed to get user'
     });
   }
 });
@@ -6653,7 +6656,7 @@ app.post('/jobportal/login', async (req, res) => {
 
   const valid = await bcrypt.compare(password, user.password);
   if (!valid) return res.status(400).json({ message: 'Invalid credentials.' });
-const token = jwt.sign({ _id: user._id, email: user.email }, JWT_SECRET);
+  const token = jwt.sign({ _id: user._id, email: user.email }, JWT_SECRET);
 
   res.cookie('jobToken', token, {
     httpOnly: true,
@@ -6667,7 +6670,7 @@ app.get('/public/job/:publicId', async (req, res) => {
   try {
     const job = await JobPost.findOne({ publicId: req.params.publicId })
       .populate('postedBy', 'name email');
-    
+
     if (!job) {
       return res.status(404).json({ error: 'Job not found' });
     }
@@ -6681,7 +6684,7 @@ app.get('/public/job/:publicId', async (req, res) => {
 // ✅ Job Posting Route
 app.post('/jobportal/post', authenticateJobPoster, upload.single('jobDescription'), async (req, res) => {
   try {
-     console.log('Received data:', req.body); // Add this for debugging
+    console.log('Received data:', req.body); // Add this for debugging
     const {
       title,
       companyName, // NEW FIELD
@@ -6757,12 +6760,12 @@ app.post('/jobportal/generate-public-url/:jobId', authenticateJobPoster, async (
   try {
     const job = await JobPost.findById(req.params.jobId);
     if (!job) return res.status(404).json({ error: 'Job not found' });
-    
+
     job.publicId = `job-${uuidv4().split('-')[0]}`;
     await job.save();
-    
-    res.json({ 
-      publicUrl: `${process.env.FRONTEND_URL}/jobs/${job.publicId}` 
+
+    res.json({
+      publicUrl: `${process.env.FRONTEND_URL}/jobs/${job.publicId}`
     });
   } catch (err) {
     res.status(500).json({ error: 'Failed to generate URL' });
@@ -6779,11 +6782,11 @@ app.get('/public/view-jd/:jobId', async (req, res) => {
 
     const filename = `JobDescription_${job.title.replace(/\s+/g, '_')}${path.extname(job.jobDescriptionFile)}`;
     const signedUrl = await getSignedUrlForS3(job.jobDescriptionFile);
-    
-    res.status(200).json({ 
-      success: true, 
+
+    res.status(200).json({
+      success: true,
       url: signedUrl,
-      filename 
+      filename
     });
   } catch (error) {
     console.error('Error viewing JD file:', error);
@@ -6801,11 +6804,11 @@ app.get('/jobportal/view-jd/:jobId', authenticateJobPoster, async (req, res) => 
 
     const filename = `JobDescription_${job.title.replace(/\s+/g, '_')}${path.extname(job.jobDescriptionFile)}`;
     const signedUrl = await getSignedUrlForS3(job.jobDescriptionFile);
-    
-    res.status(200).json({ 
-      success: true, 
+
+    res.status(200).json({
+      success: true,
       url: signedUrl,
-      filename 
+      filename
     });
   } catch (error) {
     console.error('Error viewing JD file:', error);
@@ -6823,11 +6826,11 @@ app.get('/jobportal/view-resume/:applicationId', authenticateJobPoster, async (r
 
     const filename = `Resume_${application.candidateName.replace(/\s+/g, '_')}${path.extname(application.resumeFile)}`;
     const signedUrl = await getSignedUrlForS3(application.resumeFile);
-    
-    res.status(200).json({ 
-      success: true, 
+
+    res.status(200).json({
+      success: true,
       url: signedUrl,
-      filename 
+      filename
     });
   } catch (error) {
     console.error('Error viewing resume:', error);
@@ -6839,7 +6842,7 @@ const downloadResume = async (applicationId, candidateName) => {
     const res = await axiosInstance.get(`/jobportal/view-resume/${applicationId}`, {
       headers: { Authorization: `Bearer ${sessionStorage.getItem('jobToken')}` }
     });
-    
+
     if (res.data?.url) {
       const link = document.createElement('a');
       link.href = res.data.url;
@@ -6948,7 +6951,7 @@ const saveAdmin = async () => {
   try {
     const adminEmail = process.env.ADMIN_EMAIL || 'skillmatrixai@gmail.com';
     const adminPassword = process.env.ADMIN_PASSWORD || 'admin@123';
-    
+
     const adminData = {
       fullName: process.env.ADMIN_FULLNAME || 'Admin User',
       email: adminEmail,
@@ -7005,10 +7008,10 @@ app.post('/logout', (req, res) => {
 app.post('/api/debug/trigger-scheduled-processing', async (req, res) => {
   try {
     console.log('🔧 Manual trigger: Processing scheduled tests...');
-    
+
     // Run the processing function manually
     await processScheduledTests();
-    
+
     res.json({ success: true, message: 'Scheduled test processing triggered' });
   } catch (error) {
     console.error('Manual processing error:', error);
@@ -7022,16 +7025,16 @@ app.get('/api/scheduled-tests/:id/details', authenticateJWT, async (req, res) =>
     const test = await ScheduledTest.findById(req.params.id)
       .populate('resumeId')
       .populate('jobDescriptionId');
-    
+
     if (!test) {
       return res.status(404).json({ error: 'Test not found' });
     }
-    
+
     // Security check - ensure the test belongs to the authenticated user
     if (test.user.toString() !== req.user.id && !req.user.isAdmin) {
       return res.status(403).json({ error: 'Access denied' });
     }
-    
+
     // Populate assessment session with recording and voice answers
     let session = null;
     if (test.assessmentSession) {
@@ -7041,7 +7044,7 @@ app.get('/api/scheduled-tests/:id/details', authenticateJWT, async (req, res) =>
           select: 'videoPath screenPath videoAnalysis'
         })
         .populate('voiceAnswers'); // Populate voice answers
-      
+
       // Debug logging
       console.log('Assessment Session Details:', {
         id: session._id,
@@ -7049,12 +7052,12 @@ app.get('/api/scheduled-tests/:id/details', authenticateJWT, async (req, res) =>
         voiceAnswers: session.voiceAnswers
       });
     }
-    
+
     // Get test results
-    const testResult = session ? await TestResult.findOne({ 
-      assessmentSession: session._id 
+    const testResult = session ? await TestResult.findOne({
+      assessmentSession: session._id
     }) : null;
-    
+
     // Prepare response data
     const responseData = {
       success: true,
@@ -7096,7 +7099,7 @@ app.get('/api/scheduled-tests/:id/details', authenticateJWT, async (req, res) =>
         } : null
       }
     };
-    
+
     // Debug logging
     console.log('Scheduled Test Details Response:', {
       id: test._id,
@@ -7105,11 +7108,11 @@ app.get('/api/scheduled-tests/:id/details', authenticateJWT, async (req, res) =>
       voiceAnswersCount: responseData.data.voiceAnswers.length,
       hasVoiceAnswers: responseData.data.voiceAnswers.length > 0
     });
-    
+
     res.json(responseData);
   } catch (error) {
     console.error('Error fetching scheduled test details:', error);
-    res.status(500).json({ 
+    res.status(500).json({
       success: false,
       error: 'Failed to fetch test details',
       details: process.env.NODE_ENV === 'development' ? error.message : undefined
@@ -7123,14 +7126,14 @@ app.get('/api/debug/scheduled-test/:id', async (req, res) => {
     const test = await ScheduledTest.findById(req.params.id)
       .populate('resumeId')
       .populate('jobDescriptionId');
-    
+
     if (!test) {
       return res.status(404).json({ error: 'Test not found' });
     }
-    
+
     const now = new Date();
     const shouldBeActive = now >= test.scheduledDateTime && now <= test.expiresAt;
-    
+
     res.json({
       test: test,
       currentTime: now.toISOString(),
@@ -7148,7 +7151,7 @@ app.get('/api/debug/scheduled-test/:id', async (req, res) => {
 app.put('/api/interviews/update-status', authenticateJWT, async (req, res) => {
   try {
     const { assessmentSessionId, candidateId, status, platform } = req.body;
-    
+
     console.log('🔄 Updating interview status:', {
       assessmentSessionId,
       candidateId,
@@ -7156,10 +7159,10 @@ app.put('/api/interviews/update-status', authenticateJWT, async (req, res) => {
       platform,
       timestamp: new Date().toISOString()
     });
-    
+
     // 🔥 FIX: Find interview by ScheduledTest reference since Interview schema doesn't have assessmentSessionId
     const sessionId = assessmentSessionId || candidateId;
-    
+
     // First find the ScheduledTest for this session
     const scheduledTest = await ScheduledTest.findOne({ assessmentSession: sessionId });
     if (!scheduledTest) {
@@ -7169,10 +7172,10 @@ app.put('/api/interviews/update-status', authenticateJWT, async (req, res) => {
         error: 'No scheduled test found for this assessment session'
       });
     }
-    
+
     // Find interview by ScheduledTest reference
     const interview = await Interview.findOne({ scheduledTest: scheduledTest._id });
-    
+
     if (!interview) {
       console.log('❌ Interview not found for ScheduledTest:', scheduledTest._id);
       return res.status(404).json({
@@ -7180,28 +7183,28 @@ app.put('/api/interviews/update-status', authenticateJWT, async (req, res) => {
         error: 'Interview not found for this assessment session'
       });
     }
-    
+
     // Update interview status and platform
     interview.status = status;
     if (platform) {
       interview.interviewPlatform = platform;
     }
     interview.updatedAt = new Date();
-    
+
     await interview.save();
-    
+
     console.log('✅ Interview status updated successfully:', {
       interviewId: interview._id,
       newStatus: status,
       platform: interview.interviewPlatform
     });
-    
+
     res.status(200).json({
       success: true,
       message: 'Interview status updated successfully',
       data: interview
     });
-    
+
   } catch (error) {
     console.error('❌ Error updating interview status:', error);
     res.status(500).json({
@@ -7230,7 +7233,7 @@ app.post('/api/interviews/ensure-by-session', authenticateJWT, async (req, res) 
     // 🔥 ENHANCED FIX: First check for existing interview by ScheduledTest reference
     // Since Interview schema doesn't have candidateId/assessmentSessionId, we need to find via ScheduledTest
     let scheduledTest = await ScheduledTest.findOne({ assessmentSession: sessionId });
-    
+
     if (scheduledTest) {
       // Check if interview already exists for this scheduled test
       const existingInterview = await Interview.findOne({ scheduledTest: scheduledTest._id });
@@ -7262,14 +7265,14 @@ app.post('/api/interviews/ensure-by-session', authenticateJWT, async (req, res) 
             status: 'completed',
             assessmentSession: sessionId,
             scheduledDateTime: new Date(),
-            expiresAt: new Date(Date.now() + 24*60*60*1000),
+            expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
             user: req.user.id,
             token: `auto-${sessionId}-${Date.now()}`,
             testLink: `auto-generated-${sessionId}`,
             resumeId: session.resumeId?._id,
             jobDescriptionId: session.jobDescriptionId
           },
-          { 
+          {
             upsert: true, // Create if doesn't exist
             new: true,    // Return the new document
             setDefaultsOnInsert: true // Apply defaults on insert
@@ -7320,28 +7323,28 @@ app.post('/api/interviews/ensure-by-session', authenticateJWT, async (req, res) 
           setDefaultsOnInsert: true // Apply defaults on insert
         }
       );
-      
+
       const isNewInterview = !interview.createdAt || (new Date() - interview.createdAt) < 1000;
       console.log(isNewInterview ? '✅ Created new interview with atomic operation:' : '✅ Found existing interview during atomic operation:', interview._id, 'Status:', interview.status);
 
-      return res.status(isNewInterview ? 201 : 200).json({ 
-        success: true, 
-        data: interview, 
+      return res.status(isNewInterview ? 201 : 200).json({
+        success: true,
+        data: interview,
         created: isNewInterview,
-        existed: !isNewInterview 
+        existed: !isNewInterview
       });
-      
+
     } catch (interviewError) {
       console.error('❌ Error in atomic interview creation:', interviewError);
-      
+
       // Final fallback: try to find any existing interview by ScheduledTest
       const existingInterview = await Interview.findOne({ scheduledTest: scheduledTest._id });
-      
+
       if (existingInterview) {
         console.log('🔄 Fallback: Found existing interview after error:', existingInterview._id);
         return res.json({ success: true, data: existingInterview, existed: true });
       }
-      
+
       throw interviewError; // Re-throw if no existing interview found
     }
 
@@ -7356,17 +7359,17 @@ app.post('/api/debug/activate-test/:id', async (req, res) => {
   try {
     const testId = req.params.id;
     console.log(`🔧 Manual activation for test: ${testId}`);
-    
+
     const test = await ScheduledTest.findById(testId)
       .populate('resumeId')
       .populate('jobDescriptionId')
       .populate('user')
       .populate('assessmentSession');
-      
+
     if (!test) {
       return res.status(404).json({ error: 'Test not found' });
     }
-    
+
     console.log('📊 Test Status:', {
       status: test.status,
       questionsGenerated: test.questionsGenerated,
@@ -7374,20 +7377,20 @@ app.post('/api/debug/activate-test/:id', async (req, res) => {
       candidateName: test.candidateName,
       assessmentSessionId: test.assessmentSession?._id
     });
-    
+
     // 🔥 ENHANCED FIX: Always force question generation if no assessment session exists
     if (!test.assessmentSession) {
       console.log('⚠️ No AssessmentSession found - forcing creation...');
-      
+
       try {
         console.log('🔄 Forcing question generation and session creation...');
         const result = await generateQuestionsForScheduledTest(testId);
         console.log('✅ Question generation result:', result);
-        
+
         // Reload test to get updated data
         const updatedTest = await ScheduledTest.findById(testId)
           .populate('assessmentSession');
-        
+
         // Ensure test is marked as active
         if (updatedTest.status !== 'active') {
           updatedTest.status = 'active';
@@ -7395,33 +7398,33 @@ app.post('/api/debug/activate-test/:id', async (req, res) => {
           await updatedTest.save();
           console.log('✅ Test status updated to active');
         }
-        
-        res.json({ 
-          success: true, 
+
+        res.json({
+          success: true,
           message: 'Test manually fixed - AssessmentSession created with questions',
           test: updatedTest,
           questionGeneration: result,
           fixed: 'AssessmentSession was missing and has been created'
         });
-        
+
       } catch (genError) {
         console.error('❌ Question generation failed:', genError);
-        res.status(500).json({ 
-          error: 'Failed to generate questions', 
-          details: genError.message 
+        res.status(500).json({
+          error: 'Failed to generate questions',
+          details: genError.message
         });
       }
     } else {
       // Assessment session exists, just return current state
       console.log('✅ AssessmentSession already exists');
-      res.json({ 
-        success: true, 
+      res.json({
+        success: true,
         message: 'Test is already properly configured',
         test: test,
         status: 'already_fixed'
       });
     }
-    
+
   } catch (error) {
     console.error('Manual activation error:', error);
     res.status(500).json({ error: error.message });
@@ -7434,42 +7437,42 @@ app.post('/api/debug/activate-test/:id', async (req, res) => {
 app.post('/api/interviews/schedule', authenticateJWT, async (req, res) => {
   try {
     const { scheduledTestId, candidateName, candidateEmail, jobTitle, interviewDateTime, interviewPlatform } = req.body;
-    
+
     // Validate required fields
     if (!scheduledTestId || !candidateName || !candidateEmail || !jobTitle || !interviewDateTime || !interviewPlatform) {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'All fields are required' 
+      return res.status(400).json({
+        success: false,
+        error: 'All fields are required'
       });
     }
-    
+
     // Validate interview platform
     const validPlatforms = ['Google Meet', 'Microsoft Teams', 'Zoom', 'Google Calendar'];
     if (!validPlatforms.includes(interviewPlatform)) {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'Invalid interview platform' 
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid interview platform'
       });
     }
-    
+
     // Check if scheduled test exists
     const scheduledTest = await ScheduledTest.findById(scheduledTestId);
     if (!scheduledTest) {
-      return res.status(404).json({ 
-        success: false, 
-        error: 'Scheduled test not found' 
+      return res.status(404).json({
+        success: false,
+        error: 'Scheduled test not found'
       });
     }
-    
+
     // Check if interview already exists for this scheduled test
     const existingInterview = await Interview.findOne({ scheduledTest: scheduledTestId });
     if (existingInterview) {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'Interview already scheduled for this candidate' 
+      return res.status(400).json({
+        success: false,
+        error: 'Interview already scheduled for this candidate'
       });
     }
-    
+
     // Create meeting link based on platform
     let meetingLink = '';
     switch (interviewPlatform) {
@@ -7486,7 +7489,7 @@ app.post('/api/interviews/schedule', authenticateJWT, async (req, res) => {
         meetingLink = `https://calendar.google.com/calendar/render?action=TEMPLATE&add=${encodeURIComponent(candidateEmail)}&text=${encodeURIComponent(`Interview - ${jobTitle}`)}`;
         break;
     }
-    
+
     // Create interview
     const interview = new Interview({
       scheduledTest: scheduledTestId,
@@ -7498,20 +7501,20 @@ app.post('/api/interviews/schedule', authenticateJWT, async (req, res) => {
       meetingLink,
       scheduledBy: req.user.id
     });
-    
+
     await interview.save();
-    
+
     res.status(201).json({
       success: true,
       message: 'Interview scheduled successfully',
       data: interview
     });
-    
+
   } catch (error) {
     console.error('Error scheduling interview:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: 'Failed to schedule interview' 
+    res.status(500).json({
+      success: false,
+      error: 'Failed to schedule interview'
     });
   }
 });
@@ -7520,30 +7523,30 @@ app.post('/api/interviews/schedule', authenticateJWT, async (req, res) => {
 app.get('/api/interviews/scheduled-test/:scheduledTestId', authenticateJWT, async (req, res) => {
   try {
     const { scheduledTestId } = req.params;
-    
+
     // Check if scheduled test exists
     const scheduledTest = await ScheduledTest.findById(scheduledTestId);
     if (!scheduledTest) {
-      return res.status(404).json({ 
-        success: false, 
-        error: 'Scheduled test not found' 
+      return res.status(404).json({
+        success: false,
+        error: 'Scheduled test not found'
       });
     }
-    
+
     // Get interview for this scheduled test
     const interview = await Interview.findOne({ scheduledTest: scheduledTestId })
       .populate('scheduledBy', 'fullName email');
-    
+
     res.status(200).json({
       success: true,
       data: interview
     });
-    
+
   } catch (error) {
     console.error('Error fetching interview:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: 'Failed to fetch interview' 
+    res.status(500).json({
+      success: false,
+      error: 'Failed to fetch interview'
     });
   }
 });
@@ -7552,18 +7555,18 @@ app.get('/api/interviews/scheduled-test/:scheduledTestId', authenticateJWT, asyn
 app.post('/api/interviews/feedback', authenticateJWT, async (req, res) => {
   try {
     const { candidateId, assessmentSessionId, rating, feedback, strengths, areasForImprovement, recommendation } = req.body;
-    
+
     // Validate required fields
     if (!candidateId || !assessmentSessionId || !rating || !feedback) {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'Candidate ID, assessment session ID, rating, and feedback are required' 
+      return res.status(400).json({
+        success: false,
+        error: 'Candidate ID, assessment session ID, rating, and feedback are required'
       });
     }
-    
+
     // 🔥 FIX: Find interview by ScheduledTest reference since Interview schema doesn't have assessmentSessionId
     const sessionId = assessmentSessionId || candidateId;
-    
+
     // First find the ScheduledTest for this session
     const scheduledTest = await ScheduledTest.findOne({ assessmentSession: sessionId });
     if (!scheduledTest) {
@@ -7572,7 +7575,7 @@ app.post('/api/interviews/feedback', authenticateJWT, async (req, res) => {
         error: 'No scheduled test found for this assessment session. Please schedule an interview before submitting feedback.'
       });
     }
-    
+
     // Find interview by ScheduledTest reference
     let interview = await Interview.findOne({ scheduledTest: scheduledTest._id });
     if (!interview) {
@@ -7581,34 +7584,34 @@ app.post('/api/interviews/feedback', authenticateJWT, async (req, res) => {
         error: 'No interview found for this assessment session. Please schedule an interview before submitting feedback.'
       });
     }
-    
+
     // Update interview with feedback
     interview.feedback = feedback;
     interview.rating = rating;
     interview.status = 'completed';
     interview.feedbackSubmittedAt = new Date();
     interview.updatedAt = new Date();
-    
+
     // Add additional feedback fields
     interview.feedbackDetails = {
       strengths,
       areasForImprovement,
       recommendation
     };
-    
+
     await interview.save();
-    
+
     res.status(200).json({
       success: true,
       message: 'Interview feedback submitted successfully',
       data: interview
     });
-    
+
   } catch (error) {
     console.error('Error submitting interview feedback:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: 'Failed to submit interview feedback' 
+    res.status(500).json({
+      success: false,
+      error: 'Failed to submit interview feedback'
     });
   }
 });
@@ -7624,37 +7627,37 @@ app.put('/api/interviews/:id', authenticateJWT, async (req, res) => {
   try {
     const { id } = req.params;
     const { feedback, feedbackSummary, rating, status } = req.body;
-    
+
     // Find interview
     const interview = await Interview.findById(id);
     if (!interview) {
-      return res.status(404).json({ 
-        success: false, 
-        error: 'Interview not found' 
+      return res.status(404).json({
+        success: false,
+        error: 'Interview not found'
       });
     }
-    
+
     // Update interview
     if (feedback !== undefined) interview.feedback = feedback;
     if (feedbackSummary !== undefined) interview.feedbackSummary = feedbackSummary;
     if (rating !== undefined) interview.rating = rating;
     if (status !== undefined) interview.status = status;
-    
+
     interview.updatedAt = new Date();
-    
+
     await interview.save();
-    
+
     res.status(200).json({
       success: true,
       message: 'Interview updated successfully',
       data: interview
     });
-    
+
   } catch (error) {
     console.error('Error updating interview:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: 'Failed to update interview' 
+    res.status(500).json({
+      success: false,
+      error: 'Failed to update interview'
     });
   }
 });
@@ -7663,64 +7666,64 @@ app.put('/api/interviews/:id', authenticateJWT, async (req, res) => {
 app.post('/api/candidate-decisions', authenticateJWT, async (req, res) => {
   try {
     const { scheduledTestId, interviewId, decision, rejectionReason, customRejectionReason } = req.body;
-    
+
     // Validate required fields
     if (!scheduledTestId || !decision) {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'Scheduled test ID and decision are required' 
+      return res.status(400).json({
+        success: false,
+        error: 'Scheduled test ID and decision are required'
       });
     }
-    
+
     // Validate decision
     const validDecisions = ['selected', 'rejected'];
     if (!validDecisions.includes(decision)) {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'Invalid decision' 
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid decision'
       });
     }
-    
+
     // Validate rejection reason if decision is rejected
     if (decision === 'rejected') {
       const validRejectionReasons = ['Requirements not matching', 'Location requirement not matching', 'Resume referred for other roles', 'Other'];
       if (rejectionReason && !validRejectionReasons.includes(rejectionReason)) {
-        return res.status(400).json({ 
-          success: false, 
-          error: 'Invalid rejection reason' 
+        return res.status(400).json({
+          success: false,
+          error: 'Invalid rejection reason'
         });
       }
     }
-    
+
     // Check if scheduled test exists
     const scheduledTest = await ScheduledTest.findById(scheduledTestId);
     if (!scheduledTest) {
-      return res.status(404).json({ 
-        success: false, 
-        error: 'Scheduled test not found' 
+      return res.status(404).json({
+        success: false,
+        error: 'Scheduled test not found'
       });
     }
-    
+
     // Check if interview exists (if provided)
     if (interviewId) {
       const interview = await Interview.findById(interviewId);
       if (!interview) {
-        return res.status(404).json({ 
-          success: false, 
-          error: 'Interview not found' 
+        return res.status(404).json({
+          success: false,
+          error: 'Interview not found'
         });
       }
     }
-    
+
     // Check if decision already exists for this scheduled test
     const existingDecision = await CandidateDecision.findOne({ scheduledTest: scheduledTestId });
     if (existingDecision) {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'Decision already made for this candidate' 
+      return res.status(400).json({
+        success: false,
+        error: 'Decision already made for this candidate'
       });
     }
-    
+
     // Create candidate decision
     const candidateDecision = new CandidateDecision({
       scheduledTest: scheduledTestId,
@@ -7730,40 +7733,40 @@ app.post('/api/candidate-decisions', authenticateJWT, async (req, res) => {
       customRejectionReason: decision === 'rejected' ? customRejectionReason : undefined,
       decidedBy: req.user.id
     });
-    
+
     await candidateDecision.save();
-    
+
     // If candidate is selected, generate offer letter
     if (decision === 'selected') {
       // In a real implementation, you would generate the offer letter here
       // For now, we'll just set a flag
       candidateDecision.offerLetterGenerated = true;
       await candidateDecision.save();
-      
+
       // Send notification email to candidate (implementation would go here)
     }
-    
+
     // If candidate is rejected, generate rejection letter
     if (decision === 'rejected') {
       // In a real implementation, you would generate the rejection letter here
       // For now, we'll just set a flag
       candidateDecision.rejectionLetterGenerated = true;
       await candidateDecision.save();
-      
+
       // Send notification email to candidate (implementation would go here)
     }
-    
+
     res.status(201).json({
       success: true,
       message: `Candidate ${decision} successfully`,
       data: candidateDecision
     });
-    
+
   } catch (error) {
     console.error('Error making candidate decision:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: 'Failed to make candidate decision' 
+    res.status(500).json({
+      success: false,
+      error: 'Failed to make candidate decision'
     });
   }
 });
@@ -7772,31 +7775,31 @@ app.post('/api/candidate-decisions', authenticateJWT, async (req, res) => {
 app.get('/api/candidate-decisions/scheduled-test/:scheduledTestId', authenticateJWT, async (req, res) => {
   try {
     const { scheduledTestId } = req.params;
-    
+
     // Check if scheduled test exists
     const scheduledTest = await ScheduledTest.findById(scheduledTestId);
     if (!scheduledTest) {
-      return res.status(404).json({ 
-        success: false, 
-        error: 'Scheduled test not found' 
+      return res.status(404).json({
+        success: false,
+        error: 'Scheduled test not found'
       });
     }
-    
+
     // Get decision for this scheduled test
     const decision = await CandidateDecision.findOne({ scheduledTest: scheduledTestId })
       .populate('decidedBy', 'fullName email')
       .populate('interview');
-    
+
     res.status(200).json({
       success: true,
       data: decision
     });
-    
+
   } catch (error) {
     console.error('Error fetching candidate decision:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: 'Failed to fetch candidate decision' 
+    res.status(500).json({
+      success: false,
+      error: 'Failed to fetch candidate decision'
     });
   }
 });
@@ -7805,30 +7808,30 @@ app.get('/api/candidate-decisions/scheduled-test/:scheduledTestId', authenticate
 app.get('/api/candidate-decisions/:id', authenticateJWT, async (req, res) => {
   try {
     const { id } = req.params;
-    
+
     // Get decision by ID
     const decision = await CandidateDecision.findById(id)
       .populate('scheduledTest')
       .populate('interview')
       .populate('decidedBy', 'fullName email');
-    
+
     if (!decision) {
-      return res.status(404).json({ 
-        success: false, 
-        error: 'Candidate decision not found' 
+      return res.status(404).json({
+        success: false,
+        error: 'Candidate decision not found'
       });
     }
-    
+
     res.status(200).json({
       success: true,
       data: decision
     });
-    
+
   } catch (error) {
     console.error('Error fetching candidate decision:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: 'Failed to fetch candidate decision' 
+    res.status(500).json({
+      success: false,
+      error: 'Failed to fetch candidate decision'
     });
   }
 });
@@ -7837,27 +7840,27 @@ app.get('/api/candidate-decisions/:id', authenticateJWT, async (req, res) => {
 app.post('/api/offer-letter/generate', authenticateJWT, async (req, res) => {
   try {
     const { candidateDecisionId, offerDetails } = req.body;
-    
+
     // Get candidate decision
     const candidateDecision = await CandidateDecision.findById(candidateDecisionId)
       .populate('scheduledTest')
       .populate('interview');
-    
+
     if (!candidateDecision) {
-      return res.status(404).json({ 
-        success: false, 
-        error: 'Candidate decision not found' 
+      return res.status(404).json({
+        success: false,
+        error: 'Candidate decision not found'
       });
     }
-    
+
     // Check if candidate was selected
     if (candidateDecision.decision !== 'selected') {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'Offer letter can only be generated for selected candidates' 
+      return res.status(400).json({
+        success: false,
+        error: 'Offer letter can only be generated for selected candidates'
       });
     }
-    
+
     // Create offer letter content
     const offerLetterContent = `
       <html>
@@ -7911,7 +7914,7 @@ app.post('/api/offer-letter/generate', authenticateJWT, async (req, res) => {
         </body>
       </html>
     `;
-    
+
     // Convert HTML to PDF
     const pdfBuffer = await new Promise((resolve, reject) => {
       htmlToPdf.create(offerLetterContent, { format: 'Letter' }).toBuffer((err, buffer) => {
@@ -7919,24 +7922,24 @@ app.post('/api/offer-letter/generate', authenticateJWT, async (req, res) => {
         else resolve(buffer);
       });
     });
-    
+
     // Upload to S3
     const filename = `offer_letter_${candidateDecisionId}_${Date.now()}.pdf`;
     const s3Key = `offer-letters/${filename}`;
     await uploadToS3(pdfBuffer, s3Key, 'application/pdf');
-    
+
     // Generate signed URL
     const command = new GetObjectCommand({
       Bucket: process.env.MINIO_BUCKET_NAME,
       Key: s3Key
     });
     const offerLetterUrl = await getSignedUrl(s3, command, { expiresIn: 604800 }); // 7 days
-    
+
     // Update candidate decision with offer letter details
     candidateDecision.offerLetterGenerated = true;
     candidateDecision.offerLetterUrl = s3Key;
     await candidateDecision.save();
-    
+
     res.status(200).json({
       success: true,
       message: 'Offer letter generated successfully',
@@ -7946,12 +7949,12 @@ app.post('/api/offer-letter/generate', authenticateJWT, async (req, res) => {
         filename
       }
     });
-    
+
   } catch (error) {
     console.error('Error generating offer letter:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: 'Failed to generate offer letter' 
+    res.status(500).json({
+      success: false,
+      error: 'Failed to generate offer letter'
     });
   }
 });
@@ -7960,32 +7963,32 @@ app.post('/api/offer-letter/generate', authenticateJWT, async (req, res) => {
 app.post('/api/rejection-report/generate', authenticateJWT, async (req, res) => {
   try {
     const { candidateDecisionId } = req.body;
-    
+
     // Get candidate decision
     const candidateDecision = await CandidateDecision.findById(candidateDecisionId)
       .populate('scheduledTest')
       .populate('interview');
-    
+
     if (!candidateDecision) {
-      return res.status(404).json({ 
-        success: false, 
-        error: 'Candidate decision not found' 
+      return res.status(404).json({
+        success: false,
+        error: 'Candidate decision not found'
       });
     }
-    
+
     // Check if candidate was rejected
     if (candidateDecision.decision !== 'rejected') {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'Rejection report can only be generated for rejected candidates' 
+      return res.status(400).json({
+        success: false,
+        error: 'Rejection report can only be generated for rejected candidates'
       });
     }
-    
+
     // Create rejection report content
-    const rejectionReason = candidateDecision.rejectionReason === 'Other' 
-      ? candidateDecision.customRejectionReason 
+    const rejectionReason = candidateDecision.rejectionReason === 'Other'
+      ? candidateDecision.customRejectionReason
       : candidateDecision.rejectionReason;
-      
+
     const rejectionReportContent = `
       <html>
         <head>
@@ -8031,7 +8034,7 @@ app.post('/api/rejection-report/generate', authenticateJWT, async (req, res) => 
         </body>
       </html>
     `;
-    
+
     // Convert HTML to PDF
     const pdfBuffer = await new Promise((resolve, reject) => {
       htmlToPdf.create(rejectionReportContent, { format: 'Letter' }).toBuffer((err, buffer) => {
@@ -8039,24 +8042,24 @@ app.post('/api/rejection-report/generate', authenticateJWT, async (req, res) => 
         else resolve(buffer);
       });
     });
-    
+
     // Upload to S3
     const filename = `rejection_report_${candidateDecisionId}_${Date.now()}.pdf`;
     const s3Key = `rejection-reports/${filename}`;
     await uploadToS3(pdfBuffer, s3Key, 'application/pdf');
-    
+
     // Generate signed URL
     const command = new GetObjectCommand({
       Bucket: process.env.MINIO_BUCKET_NAME,
       Key: s3Key
     });
     const rejectionReportUrl = await getSignedUrl(s3, command, { expiresIn: 604800 }); // 7 days
-    
+
     // Update candidate decision with rejection report details
     candidateDecision.rejectionLetterGenerated = true;
     candidateDecision.rejectionLetterUrl = s3Key;
     await candidateDecision.save();
-    
+
     res.status(200).json({
       success: true,
       message: 'Rejection report generated successfully',
@@ -8066,12 +8069,12 @@ app.post('/api/rejection-report/generate', authenticateJWT, async (req, res) => 
         filename
       }
     });
-    
+
   } catch (error) {
     console.error('Error generating rejection report:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: 'Failed to generate rejection report' 
+    res.status(500).json({
+      success: false,
+      error: 'Failed to generate rejection report'
     });
   }
 });
@@ -8080,155 +8083,113 @@ app.post('/api/rejection-report/generate', authenticateJWT, async (req, res) => 
 app.post('/api/offer-letter/send', authenticateJWT, async (req, res) => {
   try {
     const { candidateDecisionId, offerDetails } = req.body;
-    
+
     // Get candidate decision
     const candidateDecision = await CandidateDecision.findById(candidateDecisionId)
       .populate('scheduledTest');
-    
+
     if (!candidateDecision) {
-      return res.status(404).json({ 
-        success: false, 
-        error: 'Candidate decision not found' 
+      return res.status(404).json({
+        success: false,
+        error: 'Candidate decision not found'
       });
     }
-    
+
     // Check if candidate was selected
     if (candidateDecision.decision !== 'selected') {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'Offer letter can only be sent for selected candidates' 
+      return res.status(400).json({
+        success: false,
+        error: 'Offer letter can only be sent for selected candidates'
       });
     }
-    
+
     // Check if offer letter was generated
     if (!candidateDecision.offerLetterGenerated || !candidateDecision.offerLetterUrl) {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'Offer letter must be generated before sending' 
+      return res.status(400).json({
+        success: false,
+        error: 'Offer letter must be generated before sending'
       });
     }
+
+    // Use the improved email service
+    const { sendOfferLetterToBoth } = require('./services/fixedOfferEmailService');
     
-    // Get signed URL for offer letter
-    const command = new GetObjectCommand({
-      Bucket: process.env.MINIO_BUCKET_NAME,
-      Key: candidateDecision.offerLetterUrl
-    });
-    const offerLetterUrl = await getSignedUrl(s3, command, { expiresIn: 604800 }); // 7 days
-    
-    // Send email to candidate
-    const mailOptions = {
-      from: `"HR Department" <${process.env.EMAIL_USER}>`,
-      to: candidateDecision.scheduledTest.candidateEmail,
-      subject: `Job Offer - ${candidateDecision.scheduledTest.jobTitle}`,
-      html: `
-        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-          <h2 style="color: #2563eb;">Job Offer</h2>
-          <p>Dear ${candidateDecision.scheduledTest.candidateName},</p>
-          <p>We are pleased to inform you that you have been selected for the position of <strong>${offerDetails.jobRole || candidateDecision.scheduledTest.jobTitle}</strong>.</p>
-          <p>Please find attached the official offer letter with detailed information about the position, compensation, and other terms of employment.</p>
-          <div style="text-align: center; margin: 20px 0;">
-            <a href="${offerLetterUrl}" 
-               style="background-color: #2563eb; color: white; padding: 10px 20px; 
-                      text-decoration: none; border-radius: 5px; display: inline-block;">
-              Download Offer Letter
-            </a>
-          </div>
-          <p>Please review the offer letter carefully and respond by the specified deadline.</p>
-          <p>If you have any questions, please don't hesitate to contact us.</p>
-          <p>Best regards,<br/>${req.user.fullName}<br/>HR Department</p>
-          <p style="color: #6b7280; font-size: 12px; margin-top: 30px;">
-            This is an automated message. Please do not reply to this email.
-          </p>
-        </div>
-      `
+    // Prepare offer data for the improved service
+    const offerDataForEmail = {
+      candidateName: candidateDecision.scheduledTest.candidateName,
+      candidateEmail: candidateDecision.scheduledTest.candidateEmail,
+      position: offerDetails.jobRole || candidateDecision.scheduledTest.jobTitle,
+      salary: offerDetails.salary || 'As discussed',
+      startDate: offerDetails.startDate || 'To be decided',
+      companyName: req.user.companyName || 'Company',
+      hrEmail: req.user.email,
+      department: offerDetails.department || '',
+      benefits: offerDetails.benefits || '',
+      hrName: req.user.fullName || 'HR Team'
     };
-    
-    await transporter.sendMail(mailOptions);
-    
-    // Send copy to HR
-    const hrMailOptions = {
-      from: `"HR Department" <${process.env.EMAIL_USER}>`,
-      to: req.user.email,
-      subject: `Offer Letter Sent - ${candidateDecision.scheduledTest.candidateName}`,
-      html: `
-        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-          <h2 style="color: #2563eb;">Offer Letter Sent</h2>
-          <p>The offer letter for <strong>${candidateDecision.scheduledTest.candidateName}</strong> has been sent successfully.</p>
-          <p>Position: <strong>${offerDetails.jobRole || candidateDecision.scheduledTest.jobTitle}</strong></p>
-          <div style="text-align: center; margin: 20px 0;">
-            <a href="${offerLetterUrl}" 
-               style="background-color: #2563eb; color: white; padding: 10px 20px; 
-                      text-decoration: none; border-radius: 5px; display: inline-block;">
-              View Offer Letter
-            </a>
-          </div>
-          <p style="color: #6b7280; font-size: 12px; margin-top: 30px;">
-            This is an automated message. Please do not reply to this email.
-          </p>
-        </div>
-      `
-    };
-    
-    await transporter.sendMail(hrMailOptions);
-    
+
+    const emailResult = await sendOfferLetterToBoth(offerDataForEmail, candidateDecision.offerLetterUrl);
+
     res.status(200).json({
       success: true,
-      message: 'Offer letter sent successfully to candidate and HR'
+      message: 'Offer letter sent successfully to candidate and HR',
+      emailResult
     });
-    
+
   } catch (error) {
     console.error('Error sending offer letter:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: 'Failed to send offer letter' 
+    res.status(500).json({
+      success: false,
+      error: 'Failed to send offer letter'
     });
   }
 });
+
 
 // Send rejection report
 app.post('/api/rejection-report/send', authenticateJWT, async (req, res) => {
   try {
     const { candidateDecisionId } = req.body;
-    
+
     // Get candidate decision
     const candidateDecision = await CandidateDecision.findById(candidateDecisionId)
       .populate('scheduledTest');
-    
+
     if (!candidateDecision) {
-      return res.status(404).json({ 
-        success: false, 
-        error: 'Candidate decision not found' 
+      return res.status(404).json({
+        success: false,
+        error: 'Candidate decision not found'
       });
     }
-    
+
     // Check if candidate was rejected
     if (candidateDecision.decision !== 'rejected') {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'Rejection report can only be sent for rejected candidates' 
+      return res.status(400).json({
+        success: false,
+        error: 'Rejection report can only be sent for rejected candidates'
       });
     }
-    
+
     // Check if rejection report was generated
     if (!candidateDecision.rejectionLetterGenerated || !candidateDecision.rejectionLetterUrl) {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'Rejection report must be generated before sending' 
+      return res.status(400).json({
+        success: false,
+        error: 'Rejection report must be generated before sending'
       });
     }
-    
+
     // Get signed URL for rejection report
     const command = new GetObjectCommand({
       Bucket: process.env.MINIO_BUCKET_NAME,
       Key: candidateDecision.rejectionLetterUrl
     });
     const rejectionReportUrl = await getSignedUrl(s3, command, { expiresIn: 604800 }); // 7 days
-    
+
     // Get rejection reason
-    const rejectionReason = candidateDecision.rejectionReason === 'Other' 
-      ? candidateDecision.customRejectionReason 
+    const rejectionReason = candidateDecision.rejectionReason === 'Other'
+      ? candidateDecision.customRejectionReason
       : candidateDecision.rejectionReason;
-    
+
     // Send email to candidate
     const mailOptions = {
       from: `"HR Department" <${process.env.EMAIL_USER}>`,
@@ -8250,19 +8211,19 @@ app.post('/api/rejection-report/send', authenticateJWT, async (req, res) => {
         </div>
       `
     };
-    
+
     await transporter.sendMail(mailOptions);
-    
+
     res.status(200).json({
       success: true,
       message: 'Rejection report sent successfully to candidate'
     });
-    
+
   } catch (error) {
     console.error('Error sending rejection report:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: 'Failed to send rejection report' 
+    res.status(500).json({
+      success: false,
+      error: 'Failed to send rejection report'
     });
   }
 });
@@ -8324,29 +8285,29 @@ app.get('/api/candidates/:candidateId/details', authenticateJWT, async (req, res
   try {
     const { candidateId } = req.params;
     const { assessmentSessionId } = req.query;
-    
+
     console.log('Fetching candidate details for:', { candidateId, assessmentSessionId });
-    
+
     // Get assessment session data (since candidateId is actually the assessment session ID)
     const assessment = await AssessmentSession.findById(assessmentSessionId || candidateId)
       .populate('resumeId')
       .populate('jobDescriptionId')
       .populate('testResult');
-    
+
     if (!assessment) {
       return res.status(404).json({
         success: false,
         error: 'Assessment session not found'
       });
     }
-    
+
     // Create candidate data from assessment with enhanced name parsing
     const candidate = {
       _id: assessment._id,
       name: (() => {
         // Enhanced name parsing logic - consistent with frontend
         let displayName = 'Unknown Candidate';
-        
+
         // Priority: 1. Check if resumeId.name exists and is not an email
         if (assessment.resumeId?.name && typeof assessment.resumeId.name === 'string' && assessment.resumeId.name.trim()) {
           const nameValue = assessment.resumeId.name.trim();
@@ -8376,7 +8337,7 @@ app.get('/api/candidates/:candidateId/details', authenticateJWT, async (req, res
             .trim();
           displayName = prettyName || 'Candidate';
         }
-        
+
         return displayName;
       })(),
       email: assessment.candidateEmail,
@@ -8385,13 +8346,13 @@ app.get('/api/candidates/:candidateId/details', authenticateJWT, async (req, res
       skills: assessment.resumeId?.skills || [],
       resume: assessment.resumeId
     };
-    
+
     res.status(200).json({
       success: true,
       candidate,
       assessment
     });
-    
+
   } catch (error) {
     console.error('Error fetching candidate details:', error);
     res.status(500).json({
@@ -8405,7 +8366,7 @@ app.get('/api/candidates/:candidateId/details', authenticateJWT, async (req, res
 app.post('/api/interviews/schedule', authenticateJWT, async (req, res) => {
   try {
     const { candidateId, assessmentSessionId, platform, date, time, duration, notes } = req.body;
-    
+
     // Create interview record
     const interview = new Interview({
       candidateId,
@@ -8418,27 +8379,27 @@ app.post('/api/interviews/schedule', authenticateJWT, async (req, res) => {
       createdBy: req.user.id,
       createdAt: new Date()
     });
-    
+
     await interview.save();
-    
+
     // Get assessment session data
     const assessment = await AssessmentSession.findById(assessmentSessionId || candidateId)
       .populate('resumeId');
-    
+
     if (!assessment) {
       return res.status(404).json({
         success: false,
         error: 'Assessment session not found'
       });
     }
-    
+
     // Create candidate data from assessment with consistent name parsing
     const candidate = {
       _id: assessment._id,
       name: (() => {
         // Enhanced name parsing logic - consistent with other endpoints
         let displayName = 'Unknown Candidate';
-        
+
         // Priority: 1. Check if resumeId.name exists and is not an email
         if (assessment.resumeId?.name && typeof assessment.resumeId.name === 'string' && assessment.resumeId.name.trim()) {
           const nameValue = assessment.resumeId.name.trim();
@@ -8468,7 +8429,7 @@ app.post('/api/interviews/schedule', authenticateJWT, async (req, res) => {
             .trim();
           displayName = prettyName || 'Candidate';
         }
-        
+
         return displayName;
       })(),
       email: assessment.candidateEmail
@@ -8486,13 +8447,13 @@ app.post('/api/interviews/schedule', authenticateJWT, async (req, res) => {
       notes,
       jobTitle: assessment?.jobTitle || 'Position'
     });
-    
+
     res.status(200).json({
       success: true,
       interviewId: interview._id,
       message: 'Interview scheduled successfully'
     });
-    
+
   } catch (error) {
     console.error('Error scheduling interview:', error);
     res.status(500).json({
@@ -8512,41 +8473,39 @@ app.post('/api/candidates/select', authenticateJWT, async (req, res) => {
         error: 'Position, salary, and start date are required to generate an offer letter.'
       });
     }
-    
+
     // Get assessment session data
     const assessment = await AssessmentSession.findById(assessmentSessionId || candidateId)
       .populate('resumeId')
       .populate('jobDescriptionId');
-    
+
     if (!assessment) {
       return res.status(404).json({
         success: false,
         error: 'Assessment session not found'
       });
     }
-    
+
     // Get user data for company info
     const user = await User.findById(req.user.id);
-    
+
     // Create candidate data from assessment
     const candidate = {
       _id: assessment._id, // Use assessment session ID as candidate ID
       name: assessment.resumeId?.name || assessment.candidateEmail?.split('@')[0]?.replace(/[._-]/g, ' ') || 'Candidate',
       email: assessment.candidateEmail
     };
-    
+
     // Generate PDF either from provided HTML (preferred) or from professional template
+    // Use the new PDF generation with letterhead merging
+    const { generatePDFFromHTMLWithLetterhead } = require('./services/offerLetterService');
     let pdfBuffer;
     if (offerHtml && offerHtml.trim()) {
-      // Use html-pdf (already installed) to render HTML to PDF
-      pdfBuffer = await new Promise((resolve, reject) => {
-        htmlToPdf.create(offerHtml, { format: 'A4', border: '10mm' }).toBuffer((err, buffer) => {
-          if (err) return reject(err);
-          resolve(buffer);
-        });
-      });
+      pdfBuffer = await generatePDFFromHTMLWithLetterhead(offerHtml, req.user.id);
     } else {
-      pdfBuffer = await generateProfessionalOfferLetter({
+      // Generate from template and then merge with letterhead
+      const { generateProfessionalTemplate } = require('./services/offerLetterService');
+      const templateHtml = generateProfessionalTemplate({
         candidateName: candidate.name,
         candidateEmail: candidate.email,
         position: offerData.position || assessment.jobTitle,
@@ -8560,6 +8519,7 @@ app.post('/api/candidates/select', authenticateJWT, async (req, res) => {
         assessmentScore: assessment.testResult?.combinedScore || 'N/A',
         interviewRating: interviewFeedback?.rating || 'N/A'
       });
+      pdfBuffer = await generatePDFFromHTMLWithLetterhead(templateHtml, req.user.id);
     }
 
     // Upload the resulting PDF to S3
@@ -8571,43 +8531,77 @@ app.post('/api/candidates/select', authenticateJWT, async (req, res) => {
       Key: s3Key
     });
     const offerLetterUrl = await getSignedUrl(s3, command, { expiresIn: 604800 });
-    // Send offer letter email to candidate
+    
+    // Send offer letter email to both candidate and HR using the improved service
     const candidateEmail = candidate.email || assessment.candidateEmail || offerData?.candidateEmail;
     if (!candidateEmail) {
       console.warn('No candidate email available to send offer letter');
       return res.status(400).json({ success: false, error: 'Candidate email is missing. Please add email and try again.' });
     }
+    
+    let candidateEmailSent = false;
+    let hrEmailSent = false;
+    let emailErrors = [];
+    
     try {
-      const { sendOfferLetter } = require('./services/interviewService');
+      // Use the improved email service with better error handling
+      const { sendOfferLetterToBoth } = require('./services/fixedOfferEmailService');
       console.log(`[MAIL] Preparing candidate offer send to ${candidateEmail}`);
-      await sendOfferLetter({
+      console.log(`[MAIL] Offer data:`, {
         candidateName: candidate.name,
-        candidateEmail,
         position: offerData.position || assessment.jobTitle,
         salary: offerData.salary,
         startDate: offerData.startDate,
-        companyName: offerData?.companyName || user.companyName
-      }, offerLetterUrl); 
-    } catch (e) {
-      console.warn('Failed to send Candidate offer letter:', e?.message);
-    }
-    // Also send a copy to HR using rich summary template
-    try {
-      const { sendOfferLetterToHR } = require('./services/interviewService');
-      await sendOfferLetterToHR({
-        hrEmail: user.email,
         companyName: offerData?.companyName || user.companyName,
+        hrEmail: user.email
+      });
+      
+      // Prepare offer data for the improved service
+      const offerDataForEmail = {
         candidateName: candidate.name,
+        candidateEmail: candidateEmail,
         position: offerData.position || assessment.jobTitle,
         salary: offerData.salary,
         startDate: offerData.startDate,
-        assessmentScore: assessment.testResult?.combinedScore || 'N/A',
-        interviewRating: interviewFeedback?.rating || 'N/A'
-      }, offerLetterUrl); 
+        companyName: offerData?.companyName || user.companyName,
+        hrEmail: user.email,
+        department: offerData.department || '',
+        benefits: offerData.benefits || '',
+        hrName: user.fullName || 'HR Team'
+      };
+      
+      const emailResult = await sendOfferLetterToBoth(offerDataForEmail, s3Key);
+      
+      candidateEmailSent = emailResult.candidateEmailSent;
+      hrEmailSent = emailResult.hrEmailSent;
+      
+      console.log(`[MAIL] Candidate offer sent successfully to ${candidateEmail}`, emailResult.candidateMessageId || 'OK');
+      console.log(`[MAIL] HR offer copy sent successfully to ${user.email}`, emailResult.hrMessageId || 'OK');
     } catch (e) {
-      console.warn('Failed to send HR copy of offer letter:', e?.message);
+      const errorMsg = `Failed to send offer letters: ${e?.message || e}`;
+      console.error(`[MAIL] ERROR: ${errorMsg}`);
+      console.error(`[MAIL] ERROR DETAILS:`, e);
+      emailErrors.push(errorMsg);
+    }
+
+    // If neither email was sent, return an error
+    if (!candidateEmailSent && !hrEmailSent) {
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to send offer letters to both candidate and HR. Please check email configuration.',
+        emailErrors
+      });
+    }
+
+    // If only one email was sent, log a warning but continue
+    if (!candidateEmailSent) {
+      console.warn('Warning: Candidate email failed but HR email sent successfully');
     }
     
+    if (!hrEmailSent) {
+      console.warn('Warning: HR email failed but candidate email sent successfully');
+    }
+
     // Resolve or create ScheduledTest to satisfy schema
     let scheduledTestDoc = await ScheduledTest.findOne({ assessmentSession: assessment._id });
     if (!scheduledTestDoc) {
@@ -8618,7 +8612,7 @@ app.post('/api/candidates/select', authenticateJWT, async (req, res) => {
         status: 'completed',
         assessmentSession: assessment._id,
         scheduledDateTime: new Date(),
-        expiresAt: new Date(Date.now() + 24*60*60*1000),
+        expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
         user: req.user.id,
         // Required fields for ScheduledTest schema
         token: `${String(assessment._id)}-${Date.now()}`,
@@ -8641,15 +8635,15 @@ app.post('/api/candidates/select', authenticateJWT, async (req, res) => {
       decidedBy: req.user.id,
       decidedAt: new Date()
     });
-    
+
     await candidateDecision.save();
-    
+
     res.status(200).json({
       success: true,
       message: 'Candidate selected successfully. Offer letter generated and sent.',
       data: candidateDecision
     });
-    
+
   } catch (error) {
     console.error('Error selecting candidate:', error);
     res.status(500).json({
@@ -8671,7 +8665,7 @@ app.post('/api/offers/draft', authenticateJWT, async (req, res) => {
 
     // Load offer letter templates
     const { getOfferLetterTemplate, generateProfessionalTemplate, generateExecutiveTemplate, generateStartupTemplate, generateFormalTemplate } = require('./services/offerLetterService');
-    
+
     // Define templates object
     const templates = {
       professional: generateProfessionalTemplate,
@@ -8691,18 +8685,60 @@ app.post('/api/offers/draft', authenticateJWT, async (req, res) => {
       return res.status(400).json({ success: false, error: 'Invalid template' });
     }
 
+    // Pass all offerData fields to the template
     const offerHtml = offerTemplate({
+      // Basic template fields
       candidateName,
       jobTitle,
       companyName,
       today,
-      position: offerData.position,
-      salary: offerData.salary,
-      startDate: offerData.startDate,
-      benefits: offerData.benefits,
-      notes: offerData.notes,
-      hrName: user.fullName,
-      hrEmail: user.email
+
+      // Candidate Details
+      candidateEmail: offerData?.candidateEmail || assessment.candidateEmail || '',
+      candidateAddress: offerData?.candidateAddress || '',
+      candidatePhone: offerData?.candidatePhone || '',
+
+      // Position Details
+      position: offerData?.position || jobTitle,
+      department: offerData?.department || '',
+      employmentType: offerData?.employmentType || 'Full-time',
+      reportingManager: offerData?.reportingManager || '',
+      workLocation: offerData?.workLocation || 'Office',
+
+      // Salary & Benefits
+      salary: offerData?.salary || '',
+      currency: offerData?.currency || 'INR',
+      salaryFrequency: offerData?.salaryFrequency || 'per annum',
+      benefits: offerData?.benefits || '',
+
+      // Dates & Terms
+      startDate: offerData?.startDate || '',
+      endDate: offerData?.endDate || '',
+      probationPeriod: offerData?.probationPeriod || '3 months',
+      noticePeriod: offerData?.noticePeriod || '30 days',
+      workingHours: offerData?.workingHours || '9 AM to 6 PM',
+      workingDays: offerData?.workingDays || 'Monday to Friday',
+
+      // Company Details
+      companyAddress: offerData?.companyAddress || '',
+      companyPhone: offerData?.companyPhone || '',
+      companyEmail: offerData?.companyEmail || user?.email || '',
+      companyWebsite: offerData?.companyWebsite || '',
+
+      // HR Details
+      hrName: offerData?.hrName || user?.fullName || '',
+      hrTitle: offerData?.hrTitle || 'HR Manager',
+      hrEmail: offerData?.hrEmail || user?.email || '',
+      hrPhone: offerData?.hrPhone || '',
+
+      // Additional Terms
+      additionalTerms: offerData?.additionalTerms || '',
+      specialConditions: offerData?.specialConditions || '',
+      notes: offerData?.notes || '',
+
+      // Interview Details
+      interviewDate: offerData?.interviewDate || '',
+      interviewFeedback: offerData?.interviewFeedback || ''
     });
 
     res.status(200).json({
@@ -8724,30 +8760,30 @@ app.post('/api/candidates/:candidateId/request-documents', authenticateJWT, asyn
   try {
     const { candidateId } = req.params;
     const { assessmentSessionId, documentTypes, customMessage, template } = req.body;
-    
+
     // Get assessment session data
     const assessment = await AssessmentSession.findById(assessmentSessionId || candidateId)
       .populate('resumeId');
-    
+
     if (!assessment) {
       return res.status(404).json({
         success: false,
         error: 'Assessment session not found'
       });
     }
-    
+
     // Get user data for company info
     const user = await User.findById(req.user.id);
-    
+
     // Create candidate data from assessment
     const candidate = {
       name: assessment.resumeId?.name || assessment.candidateEmail,
       email: assessment.candidateEmail
     };
-    
+
     // Send document collection email to candidate
     const { sendDocumentCollectionEmail } = require('./services/interviewService');
-    
+
     await sendDocumentCollectionEmail({
       candidateName: candidate.name,
       candidateEmail: candidate.email,
@@ -8758,7 +8794,7 @@ app.post('/api/candidates/:candidateId/request-documents', authenticateJWT, asyn
       templateId: template, // If template is a string ID, use it
       userId: req.user.id
     });
-    
+
     // If template is a user-defined template ID, validate it
     let templateToUse = template;
     if (template && !['standard', 'formal', 'friendly'].includes(template)) {
@@ -8774,7 +8810,7 @@ app.post('/api/candidates/:candidateId/request-documents', authenticateJWT, asyn
         templateToUse = 'standard'; // Fallback to standard if validation fails
       }
     }
-    
+
     // Create document collection record
     const documentCollection = new DocumentCollection({
       candidateId,
@@ -8786,15 +8822,15 @@ app.post('/api/candidates/:candidateId/request-documents', authenticateJWT, asyn
       status: 'requested',
       requestedAt: new Date()
     });
-    
+
     await documentCollection.save();
-    
+
     res.status(200).json({
       success: true,
       message: 'Document collection request sent successfully',
       data: documentCollection
     });
-    
+
   } catch (error) {
     console.error('Error requesting documents:', error);
     res.status(500).json({
@@ -8809,7 +8845,7 @@ app.get('/api/document-collection/templates', authenticateJWT, async (req, res) 
   try {
     const { getUserTemplates } = require('./services/documentTemplateService');
     const templates = await getUserTemplates(req.user.id);
-    
+
     res.status(200).json({
       success: true,
       data: templates
@@ -8828,12 +8864,12 @@ app.post('/api/document-collection/templates', authenticateJWT, async (req, res)
   try {
     const { createTemplate } = require('./services/documentTemplateService');
     const templateData = req.body;
-    
+
     // Add user ID to template data
     templateData.userId = req.user.id;
-    
+
     const template = await createTemplate(templateData);
-    
+
     res.status(201).json({
       success: true,
       message: 'Template created successfully',
@@ -8854,16 +8890,16 @@ app.put('/api/document-collection/templates/:templateId', authenticateJWT, async
     const { updateTemplate } = require('./services/documentTemplateService');
     const { templateId } = req.params;
     const templateData = req.body;
-    
+
     const template = await updateTemplate(templateId, templateData, req.user.id);
-    
+
     if (!template) {
       return res.status(404).json({
         success: false,
         error: 'Template not found'
       });
     }
-    
+
     res.status(200).json({
       success: true,
       message: 'Template updated successfully',
@@ -8883,16 +8919,16 @@ app.delete('/api/document-collection/templates/:templateId', authenticateJWT, as
   try {
     const { deleteTemplate } = require('./services/documentTemplateService');
     const { templateId } = req.params;
-    
+
     const result = await deleteTemplate(templateId, req.user.id);
-    
+
     if (!result) {
       return res.status(404).json({
         success: false,
         error: 'Template not found'
       });
     }
-    
+
     res.status(200).json({
       success: true,
       message: 'Template deleted successfully'
@@ -8906,26 +8942,74 @@ app.delete('/api/document-collection/templates/:templateId', authenticateJWT, as
   }
 });
 
+// Schedule periodic cleanup of old letterheads (once per day)
+setInterval(async () => {
+  try {
+    console.log('🕒 [SCHEDULED TASK] Running periodic letterhead cleanup');
+
+    // Get all companies with letterheads
+    const companies = await User.find({}, '_id');
+
+    let totalDeleted = 0;
+    for (const company of companies) {
+      try {
+        const { cleanupOldLetterheads } = require('./services/letterheadService');
+        const result = await cleanupOldLetterheads(company._id, 30); // Cleanup letterheads older than 30 days
+        totalDeleted += result.deleted;
+      } catch (companyError) {
+        console.error(`❌ [SCHEDULED TASK] Error cleaning up letterheads for company ${company._id}:`, companyError);
+      }
+    }
+
+    console.log('✅ [SCHEDULED TASK] Letterhead cleanup completed:', { totalDeleted });
+  } catch (error) {
+    console.error('❌ [SCHEDULED TASK] Error in periodic letterhead cleanup:', error);
+  }
+}, 24 * 60 * 60 * 1000); // Run once per day
+
+// Cleanup old letterheads endpoint
+app.post('/api/letterhead/cleanup', authenticateJWT, async (req, res) => {
+  try {
+    const { daysOld } = req.body || {};
+    const days = daysOld && Number.isInteger(daysOld) ? daysOld : 30;
+
+    const { cleanupOldLetterheads } = require('./services/letterheadService');
+    const result = await cleanupOldLetterheads(req.user.id, days);
+
+    res.status(200).json({
+      success: true,
+      message: `Cleanup completed. ${result.deleted} old letterheads removed.`,
+      data: result
+    });
+  } catch (error) {
+    console.error('Error cleaning up letterheads:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to cleanup letterheads'
+    });
+  }
+});
+
 // Endpoint to upload documents
 app.post('/api/candidates/:candidateId/upload-documents', authenticateJWT, upload.array('documents'), async (req, res) => {
   try {
     const { candidateId } = req.params;
     const { documentCollectionId } = req.body;
     const files = req.files;
-    
+
     if (!files || files.length === 0) {
       return res.status(400).json({
         success: false,
         error: 'No documents uploaded'
       });
     }
-    
+
     // Upload documents to S3
     const uploadedDocuments = [];
     for (const file of files) {
       const s3Key = `candidate-documents/${candidateId}/${Date.now()}_${file.originalname}`;
       await uploadToS3(file.buffer, s3Key, file.mimetype);
-      
+
       uploadedDocuments.push({
         name: file.originalname,
         s3Key,
@@ -8934,7 +9018,7 @@ app.post('/api/candidates/:candidateId/upload-documents', authenticateJWT, uploa
         uploadedAt: new Date()
       });
     }
-    
+
     // Update document collection record
     const documentCollection = await DocumentCollection.findById(documentCollectionId);
     if (documentCollection) {
@@ -8943,7 +9027,7 @@ app.post('/api/candidates/:candidateId/upload-documents', authenticateJWT, uploa
       documentCollection.uploadedAt = new Date();
       await documentCollection.save();
     }
-    
+
     res.status(200).json({
       success: true,
       message: 'Documents uploaded successfully',
@@ -8952,7 +9036,7 @@ app.post('/api/candidates/:candidateId/upload-documents', authenticateJWT, uploa
         documents: uploadedDocuments
       }
     });
-    
+
   } catch (error) {
     console.error('Error uploading documents:', error);
     res.status(500).json({
@@ -8966,7 +9050,7 @@ app.post('/api/candidates/:candidateId/upload-documents', authenticateJWT, uploa
 app.get('/api/candidates/:candidateId/document-collection/:documentCollectionId', authenticateJWT, async (req, res) => {
   try {
     const { candidateId, documentCollectionId } = req.params;
-    
+
     const documentCollection = await DocumentCollection.findById(documentCollectionId);
     if (!documentCollection) {
       return res.status(404).json({
@@ -8974,12 +9058,12 @@ app.get('/api/candidates/:candidateId/document-collection/:documentCollectionId'
         error: 'Document collection not found'
       });
     }
-    
+
     res.status(200).json({
       success: true,
       data: documentCollection
     });
-    
+
   } catch (error) {
     console.error('Error fetching document collection:', error);
     res.status(500).json({
@@ -8989,8 +9073,289 @@ app.get('/api/candidates/:candidateId/document-collection/:documentCollectionId'
   }
 });
 
+// Letterhead upload endpoint
+app.post('/api/letterhead/upload', authenticateJWT, letterheadService.getUploadMiddleware(), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        error: 'No letterhead file uploaded'
+      });
+    }
 
+    const letterhead = await letterheadService.uploadLetterhead(req.file, req.user.id);
 
+    res.status(200).json({
+      success: true,
+      message: 'Letterhead uploaded successfully',
+      data: {
+        ...letterhead,
+        id: letterhead._id || letterhead.id
+      }
+    });
+  } catch (error) {
+    console.error('Error uploading letterhead:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to upload letterhead'
+    });
+  }
+});
+
+// Get active letterhead for company
+app.get('/api/letterhead/active', authenticateJWT, async (req, res) => {
+  try {
+    const letterhead = await letterheadService.getActiveLetterhead(req.user.id);
+
+    if (!letterhead) {
+      return res.status(404).json({
+        success: false,
+        error: 'No active letterhead found'
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      data: letterhead
+    });
+  } catch (error) {
+    console.error('Error getting active letterhead:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to get active letterhead'
+    });
+  }
+});
+
+// Generate letterhead preview URL
+app.get('/api/letterhead/preview/:letterheadId', authenticateJWT, async (req, res) => {
+  try {
+    const { letterheadId } = req.params;
+
+    // First try to find by _id
+    let letterhead = await Letterhead.findOne({
+      _id: letterheadId,
+      companyId: req.user.id
+    });
+
+    // If not found by _id, try to find by s3Key (for preview functionality)
+    if (!letterhead) {
+      letterhead = await Letterhead.findOne({
+        s3Key: letterheadId,
+        companyId: req.user.id
+      });
+    }
+
+    if (!letterhead) {
+      return res.status(404).json({
+        success: false,
+        error: 'Letterhead not found'
+      });
+    }
+
+    const previewUrl = await letterheadService.generatePreviewUrl(letterhead.s3Key);
+
+    res.status(200).json({
+      success: true,
+      url: previewUrl,
+      data: {
+        id: letterhead._id,
+        s3Key: letterhead.s3Key,
+        originalName: letterhead.originalName,
+        uploadedAt: letterhead.uploadedAt
+      }
+    });
+  } catch (error) {
+    console.error('Error generating letterhead preview:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to generate letterhead preview'
+    });
+  }
+});
+
+// ==============================
+// INDUSTRIAL-GRADE OFFER LETTER ENDPOINTS
+// ==============================
+
+// Generate industrial-grade offer letter with letterhead merging
+app.post('/api/industrial-offers/generate', authenticateJWT, async (req, res) => {
+  try {
+    const { offerData } = req.body;
+
+    if (!offerData) {
+      return res.status(400).json({
+        success: false,
+        error: 'offerData is required'
+      });
+    }
+
+    // Validate required fields
+    if (!offerData.candidateName || !offerData.candidateEmail || !offerData.position) {
+      return res.status(400).json({
+        success: false,
+        error: 'candidateName, candidateEmail, and position are required'
+      });
+    }
+
+    const result = await industrialOfferLetterService.generateOfferLetter(offerData, req.user.id);
+
+    res.status(200).json({
+      success: true,
+      data: result
+    });
+
+  } catch (error) {
+    console.error('Error generating industrial offer letter:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to generate offer letter'
+    });
+  }
+});
+
+// Get offer letter details
+app.get('/api/industrial-offers/:offerLetterId', authenticateJWT, async (req, res) => {
+  try {
+    const { offerLetterId } = req.params;
+
+    const offerLetter = await industrialOfferLetterService.getOfferLetter(offerLetterId, req.user.id);
+
+    res.status(200).json({
+      success: true,
+      data: offerLetter
+    });
+
+  } catch (error) {
+    console.error('Error retrieving offer letter:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to retrieve offer letter'
+    });
+  }
+});
+
+// Get all offer letters for company with pagination
+app.get('/api/industrial-offers', authenticateJWT, async (req, res) => {
+  try {
+    const { page, limit, status } = req.query;
+
+    const result = await industrialOfferLetterService.getOfferLetters(req.user.id, {
+      page: parseInt(page) || 1,
+      limit: parseInt(limit) || 20,
+      status
+    });
+
+    res.status(200).json({
+      success: true,
+      data: result
+    });
+
+  } catch (error) {
+    console.error('Error retrieving offer letters:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to retrieve offer letters'
+    });
+  }
+});
+
+// Generate download URL for offer letter
+app.get('/api/industrial-offers/:offerLetterId/download-url', authenticateJWT, async (req, res) => {
+  try {
+    const { offerLetterId } = req.params;
+
+    // Verify the offer letter belongs to the user's company
+    const offerLetter = await industrialOfferLetterService.getOfferLetter(offerLetterId, req.user.id);
+
+    const downloadUrl = await industrialOfferLetterService.generateDownloadUrl(offerLetter.s3Key);
+
+    res.status(200).json({
+      success: true,
+      url: downloadUrl
+    });
+
+  } catch (error) {
+    console.error('Error generating download URL:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to generate download URL'
+    });
+  }
+});
+
+// Update offer letter status
+app.patch('/api/industrial-offers/:offerLetterId', authenticateJWT, async (req, res) => {
+  try {
+    const { offerLetterId } = req.params;
+    const { updateData } = req.body;
+
+    const updatedOfferLetter = await industrialOfferLetterService.updateOfferLetter(
+      offerLetterId,
+      req.user.id,
+      updateData
+    );
+
+    res.status(200).json({
+      success: true,
+      data: updatedOfferLetter
+    });
+
+  } catch (error) {
+    console.error('Error updating offer letter:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to update offer letter'
+    });
+  }
+});
+
+// Delete offer letter (soft delete)
+app.delete('/api/industrial-offers/:offerLetterId', authenticateJWT, async (req, res) => {
+  try {
+    const { offerLetterId } = req.params;
+
+    await industrialOfferLetterService.deleteOfferLetter(offerLetterId, req.user.id);
+
+    res.status(200).json({
+      success: true,
+      message: 'Offer letter deleted successfully'
+    });
+
+  } catch (error) {
+    console.error('Error deleting offer letter:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to delete offer letter'
+    });
+  }
+});
+
+// Send offer letter email to candidate and HR
+app.post('/api/industrial-offers/:offerLetterId/send-email', authenticateJWT, async (req, res) => {
+  try {
+    const { offerLetterId } = req.params;
+
+    console.log('📧 [API] Sending offer letter email for:', offerLetterId);
+
+    const emailResult = await industrialOfferLetterService.sendOfferLetterEmail(offerLetterId, req.user.id);
+
+    res.status(200).json({
+      success: true,
+      message: 'Offer letter sent successfully to candidate and HR',
+      data: emailResult
+    });
+
+  } catch (error) {
+    console.error('❌ [API] Error sending offer letter email:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to send offer letter email'
+    });
+  }
+});
+
+// ==============================
 
 // Finalize edited HTML -> PDF + email (optional alternative to /api/candidates/select)
 app.post('/api/offers/finalize', authenticateJWT, async (req, res) => {
@@ -9010,7 +9375,7 @@ app.post('/api/offers/finalize', authenticateJWT, async (req, res) => {
 
     // naive sanitization (replace with sanitize-html in production)
     const safeHtml = String(editedHtml).replace(/<script[\s\S]*?<\/script>/gi, '');
-    
+
     // Helpers to format values and fill placeholders
     const formatDate = (dateStr) => {
       if (!dateStr) return '';
@@ -9020,7 +9385,7 @@ app.post('/api/offers/finalize', authenticateJWT, async (req, res) => {
         return String(dateStr);
       }
     };
-    
+
     const formatSalary = (amount, currency = (offerData?.currency || 'INR')) => {
       if (amount === undefined || amount === null || amount === '') return '';
       const n = Number(amount);
@@ -9028,7 +9393,7 @@ app.post('/api/offers/finalize', authenticateJWT, async (req, res) => {
       const symbol = currency === 'INR' ? '₹' : (currency === 'USD' ? '$' : currency);
       return `${symbol}${formatted}`;
     };
-    
+
     const buildCandidateFullBlock = () => {
       const parts = [
         candidateName,
@@ -9037,7 +9402,7 @@ app.post('/api/offers/finalize', authenticateJWT, async (req, res) => {
       ].filter(Boolean);
       return parts.join('<br/>');
     };
-    
+
     const buildSalarySection = () => {
       const salaryFmt = formatSalary(offerData?.salary);
       return {
@@ -9050,7 +9415,7 @@ app.post('/api/offers/finalize', authenticateJWT, async (req, res) => {
         salaryInWords: ''        // optional: add number-to-words later
       };
     };
-    
+
     const fillTemplate = (html, map) =>
       Object.entries(map).reduce((acc, [k, v]) => acc.replace(new RegExp(`\\{{2}${k}\\}{2}`, 'g'), v ?? ''), html);
 
@@ -9082,7 +9447,7 @@ app.post('/api/offers/finalize', authenticateJWT, async (req, res) => {
 
     const fileName = `offer_letter_${(candidateName || 'candidate').replace(/\s+/g, '_')}_${Date.now()}.pdf`;
     const s3Key = `offer-letters/${fileName}`;
-    
+
     // After:
     await uploadToS3(pdfBuffer, s3Key, 'application/pdf');
 
@@ -9125,114 +9490,46 @@ app.post('/api/offers/finalize', authenticateJWT, async (req, res) => {
   }
 });
 
-// Generate professional offer letter PDF
-async function generateProfessionalOfferLetter(data) {
-  const PDFDocument = require('pdfkit');
-  const doc = new PDFDocument({ margin: 50 });
-  const buffers = [];
-  
-  doc.on('data', buffers.push.bind(buffers));
-  
-  // Header
-  doc.fontSize(24)
-     .font('Helvetica-Bold')
-     .text('OFFER OF EMPLOYMENT', { align: 'center' });
-  
-  doc.moveDown(2);
-  
-  // Date
-  doc.fontSize(12)
-     .font('Helvetica')
-     .text(`Date: ${new Date().toLocaleDateString()}`, { align: 'right' });
-  
-  doc.moveDown(1);
-  
-  // Candidate details
-  doc.fontSize(12)
-     .text(`Dear ${data.candidateName},`, { align: 'left' });
-  
-  doc.moveDown(1);
-  
-  // Offer content
-  doc.fontSize(12)
-     .text(`We are pleased to extend an offer of employment for the position of ${data.position} at ${data.companyName}. After careful consideration of your qualifications and performance during the interview process, we believe you would be a valuable addition to our team.`, { align: 'justify' });
-  
-  doc.moveDown(1);
-  
-  // Position details
-  doc.fontSize(14)
-     .font('Helvetica-Bold')
-     .text('Position Details:', { align: 'left' });
-  
-  doc.moveDown(0.5);
-  doc.fontSize(12)
-     .font('Helvetica')
-     .text(`Position: ${data.position}`)
-     .text(`Start Date: ${data.startDate || 'To be determined'}`)
-     .text(`Salary: ${data.salary || 'To be discussed'}`);
-  
-  if (data.benefits) {
-    doc.text(`Benefits: ${data.benefits}`);
+// Generate offer letter preview (PDF with letterhead)
+app.post('/api/offers/preview', authenticateJWT, async (req, res) => {
+  try {
+    const { offerHtml, hasLetterhead, letterheadUrl } = req.body;
+
+    if (!offerHtml) {
+      return res.status(400).json({ success: false, error: 'offerHtml is required' });
+    }
+
+    // Use the offerLetterService to generate PDF with letterhead
+    const { generatePDFFromHTMLWithLetterhead } = require('./services/offerLetterService');
+
+    let pdfBuffer;
+
+    if (hasLetterhead && letterheadUrl) {
+      // Generate PDF with letterhead merging
+      pdfBuffer = await generatePDFFromHTMLWithLetterhead(offerHtml, req.user.id);
+    } else {
+      // Generate PDF without letterhead
+      const { generatePDFFromHTML } = require('./services/offerLetterService');
+      pdfBuffer = await generatePDFFromHTML(offerHtml);
+    }
+
+    // Send PDF as response
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', 'inline; filename="offer_preview.pdf"');
+    res.send(pdfBuffer);
+
+  } catch (error) {
+    console.error('Error generating offer preview:', error);
+    res.status(500).json({ success: false, error: 'Failed to generate offer preview' });
   }
-  
-  doc.moveDown(1);
-  
-  // Performance summary
-  doc.fontSize(14)
-     .font('Helvetica-Bold')
-     .text('Performance Summary:', { align: 'left' });
-  
-  doc.moveDown(0.5);
-  doc.fontSize(12)
-     .font('Helvetica')
-     .text(`Assessment Score: ${data.assessmentScore}/100`)
-     .text(`Interview Rating: ${data.interviewRating}/5`);
-  
-  doc.moveDown(1);
-  
-  // Additional notes
-  if (data.notes) {
-    doc.fontSize(12)
-       .text(`Additional Terms: ${data.notes}`);
-    doc.moveDown(1);
-  }
-  
-  // Closing
-  doc.fontSize(12)
-     .text('We look forward to welcoming you to our team. Please confirm your acceptance of this offer by signing and returning this letter within 7 days.', { align: 'justify' });
-  
-  doc.moveDown(2);
-  
-  // Signature section
-  doc.text('Sincerely,')
-     .moveDown(1)
-     .text(data.hrName)
-     .text(data.hrEmail)
-     .text(data.companyName);
-  
-  doc.moveDown(2);
-  
-  // Candidate signature
-  doc.text('Candidate Signature: _________________________')
-     .text('Date: _________________________');
-  
-  doc.end();
-  
-  return new Promise((resolve, reject) => {
-    doc.on('end', () => {
-      const pdfBuffer = Buffer.concat(buffers);
-      resolve(pdfBuffer);
-    });
-    
-    doc.on('error', reject);
-  });
-}
+});
+
 
 // Send professional rejection email
 async function sendProfessionalRejectionEmail(data) {
   try {
     const { candidateName, candidateEmail, reason, customReason, feedback, jobTitle, interviewFeedback } = data;
-    
+
     // Get rejection reason text
     let rejectionReasonText = '';
     switch (reason) {
@@ -9251,7 +9548,7 @@ async function sendProfessionalRejectionEmail(data) {
       default:
         rejectionReasonText = 'We have decided to move forward with other candidates';
     }
-    
+
     // Create professional rejection email content
     const emailContent = `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
@@ -9289,7 +9586,7 @@ async function sendProfessionalRejectionEmail(data) {
         </div>
       </div>
     `;
-    
+
     // Send email using nodemailer
     const mailOptions = {
       from: `"SkillMatrix HR Team" <${process.env.SMTP_USER}>`,
@@ -9297,11 +9594,11 @@ async function sendProfessionalRejectionEmail(data) {
       subject: `Update on Your Application for ${jobTitle}`,
       html: emailContent
     };
-    
+
     console.log(`📧 Sending rejection email to: ${candidateEmail}`);
     await transporter.sendMail(mailOptions);
     console.log(`✅ Professional rejection email sent successfully to ${candidateEmail}`);
-    
+
   } catch (error) {
     console.error('Error sending rejection email:', error);
     throw error;
@@ -9312,25 +9609,25 @@ async function sendProfessionalRejectionEmail(data) {
 app.post('/api/candidates/reject', authenticateJWT, async (req, res) => {
   try {
     const { candidateId, assessmentSessionId, rejectionData, interviewFeedback } = req.body;
-    
+
     // Get assessment session data
     const assessment = await AssessmentSession.findById(assessmentSessionId || candidateId)
       .populate('resumeId');
-    
+
     if (!assessment) {
       return res.status(404).json({
         success: false,
         error: 'Assessment session not found'
       });
     }
-    
+
     // Create candidate data from assessment
     const candidate = {
       _id: assessment._id,
       name: assessment.resumeId?.name || assessment.candidateEmail,
       email: assessment.candidateEmail
     };
-    
+
     // Generate professional rejection email
     await sendProfessionalRejectionEmail({
       candidateName: candidate.name,
@@ -9341,7 +9638,7 @@ app.post('/api/candidates/reject', authenticateJWT, async (req, res) => {
       jobTitle: assessment.jobTitle,
       interviewFeedback: interviewFeedback
     });
-    
+
     // Create candidate decision record
     const candidateDecision = new CandidateDecision({
       candidateId,
@@ -9357,14 +9654,14 @@ app.post('/api/candidates/reject', authenticateJWT, async (req, res) => {
       decidedBy: req.user.id,
       decidedAt: new Date()
     });
-    
+
     await candidateDecision.save();
-    
+
     res.status(200).json({
       success: true,
       message: 'Candidate rejected and notification sent'
     });
-    
+
   } catch (error) {
     console.error('Error rejecting candidate:', error);
     res.status(500).json({
@@ -9401,7 +9698,7 @@ app.get('/api/candidate-decisions', authenticateJWT, async (req, res) => {
       .populate('scheduledTest')
       .populate('interview')
       .sort({ decidedAt: -1 });
-    
+
     res.status(200).json(decisions);
   } catch (error) {
     console.error('Error fetching candidate decisions:', error);
@@ -9417,6 +9714,10 @@ app.get('/api/candidate-decisions', authenticateJWT, async (req, res) => {
 // Document Collection Routes
 const documentCollectionRoutes = require('./routes/documentCollectionRoutes');
 app.use('/api/document-collection', authenticateJWT, documentCollectionRoutes);
+
+// Lead Capture Routes (No authentication required)
+const leadRoutes = require('./routes/leadRoutes');
+app.use('/api', leadRoutes);
 
 
 // Health check endpoint
@@ -9434,10 +9735,10 @@ app.set('trust proxy', true); // or a specific number if you're behind multiple 
 // Start Server
 server.listen(PORT, async () => {
   console.log(`Server running on http://localhost:${PORT}`);
-  
+
   // Test MinIO connection on startup
   await testMinIOConnection();
-  
+
   // Save admin details on server start
   saveAdmin();
   ensureCleanTempDir();

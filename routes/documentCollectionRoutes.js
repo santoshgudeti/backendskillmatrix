@@ -435,35 +435,37 @@ router.get('/:documentCollectionId', verifyDocumentCollectionOwnership, async (r
   try {
     const { documentCollectionId } = req.params;
     
-    console.log('🔍 [BACKEND DEBUG] Document collection GET request received:', {
-      documentCollectionId,
-      userId: req.user.id,
-      timestamp: new Date().toISOString(),
-      requestHeaders: req.headers,
-      queryParams: req.query
-    });
+    // 🔒 REDUCED LOGGING: Only log important events to prevent excessive logging
+    // console.log('🔍 [BACKEND DEBUG] Document collection GET request received:', {
+    //   documentCollectionId,
+    //   userId: req.user.id,
+    //   timestamp: new Date().toISOString(),
+    //   requestHeaders: req.headers,
+    //   queryParams: req.query
+    // });
     
     // Use pre-verified collection from middleware
     const documentCollection = req.documentCollection;
     
-    console.log('📊 [BACKEND DEBUG] Document collection lookup result:', {
-      found: !!documentCollection,
-      id: documentCollection?._id,
-      status: documentCollection?.status,
-      candidateId: documentCollection?.candidateId,
-      assessmentSessionId: documentCollection?.assessmentSessionId,
-      candidateName: documentCollection?.candidateName,
-      candidateEmail: documentCollection?.candidateEmail,
-      documentsCount: documentCollection?.documents?.length || 0,
-      verifiedAt: documentCollection?.verifiedAt,
-      verifiedBy: documentCollection?.verifiedBy,
-      rejectedAt: documentCollection?.rejectedAt,
-      rejectedBy: documentCollection?.rejectedBy,
-      uploadedAt: documentCollection?.uploadedAt,
-      requestedAt: documentCollection?.requestedAt,
-      ownedBy: documentCollection?.requestedBy,
-      accessedBy: req.user.id
-    });
+    // 🔒 REDUCED LOGGING: Only log important events to prevent excessive logging
+    // console.log('📊 [BACKEND DEBUG] Document collection lookup result:', {
+    //   found: !!documentCollection,
+    //   id: documentCollection?._id,
+    //   status: documentCollection?.status,
+    //   candidateId: documentCollection?.candidateId,
+    //   assessmentSessionId: documentCollection?.assessmentSessionId,
+    //   candidateName: documentCollection?.candidateName,
+    //   candidateEmail: documentCollection?.candidateEmail,
+    //   documentsCount: documentCollection?.documents?.length || 0,
+    //   verifiedAt: documentCollection?.verifiedAt,
+    //   verifiedBy: documentCollection?.verifiedBy,
+    //   rejectedAt: documentCollection?.rejectedAt,
+    //   rejectedBy: documentCollection?.rejectedBy,
+    //   uploadedAt: documentCollection?.uploadedAt,
+    //   requestedAt: documentCollection?.requestedAt,
+    //   ownedBy: documentCollection?.requestedBy,
+    //   accessedBy: req.user.id
+    // });
       
     // No need to check if collection exists - middleware already verified it
     
@@ -472,18 +474,19 @@ router.get('/:documentCollectionId', verifyDocumentCollectionOwnership, async (r
       data: documentCollection
     };
     
-    console.log('📤 [BACKEND DEBUG] Sending document collection response:', {
-      success: responseData.success,
-      dataId: responseData.data._id,
-      dataStatus: responseData.data.status,
-      candidateInfo: {
-        candidateId: responseData.data.candidateId,
-        candidateName: responseData.data.candidateName,
-        candidateEmail: responseData.data.candidateEmail
-      },
-      documentsCount: responseData.data.documents?.length || 0,
-      timestamp: new Date().toISOString()
-    });
+    // 🔒 REDUCED LOGGING: Only log important events to prevent excessive logging
+    // console.log('📤 [BACKEND DEBUG] Sending document collection response:', {
+    //   success: responseData.success,
+    //   dataId: responseData.data._id,
+    //   dataStatus: responseData.data.status,
+    //   candidateInfo: {
+    //     candidateId: responseData.data.candidateId,
+    //     candidateName: responseData.data.candidateName,
+    //     candidateEmail: responseData.data.candidateEmail
+    //   },
+    //   documentsCount: responseData.data.documents?.length || 0,
+    //   timestamp: new Date().toISOString()
+    // });
     
     res.status(200).json(responseData);
     
