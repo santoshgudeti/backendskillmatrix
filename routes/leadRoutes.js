@@ -55,6 +55,49 @@ async function downloadExcelFromMinIO() {
 }
 
 /**
+ * Helper: Initialize Excel file in MinIO if it doesn't exist
+ */
+async function initializeExcelFile() {
+  try {
+    // Try to download the existing file
+    const { workbook } = await downloadExcelFromMinIO();
+    
+    // If workbook is null, file doesn't exist and we need to create it
+    if (!workbook) {
+      console.log('Excel file does not exist in MinIO. Creating a new one...');
+      
+      // Create a new workbook with headers
+      const headers = ['Date/Time', 'Name', 'Email', 'Contact', 'Service', 'Status'];
+      const worksheet = XLSX.utils.aoa_to_sheet([headers]);
+      
+      // Set column widths for better readability
+      worksheet['!cols'] = [
+        { wch: 20 }, // Date/Time
+        { wch: 25 }, // Name
+        { wch: 30 }, // Email
+        { wch: 18 }, // Contact
+        { wch: 35 }, // Service
+        { wch: 12 }  // Status
+      ];
+      
+      // Create new workbook
+      const newWorkbook = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(newWorkbook, worksheet, 'Leads');
+      
+      // Upload to MinIO
+      await uploadExcelToMinIO(newWorkbook);
+      
+      console.log('✅ Excel file successfully created in MinIO');
+    } else {
+      console.log('✅ Excel file already exists in MinIO');
+    }
+  } catch (error) {
+    console.error('❌ Error initializing Excel file:', error);
+    throw error;
+  }
+}
+
+/**
  * Helper: Upload Excel to MinIO
  */
 async function uploadExcelToMinIO(workbook) {
@@ -216,4 +259,7 @@ router.get('/leads/download-link', async (req, res) => {
   }
 });
 
-module.exports = router;
+module.exports = {
+  router,
+  initializeExcelFile // Export the new function
+};

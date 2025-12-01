@@ -9717,8 +9717,7 @@ app.use('/api/document-collection', authenticateJWT, documentCollectionRoutes);
 
 // Lead Capture Routes (No authentication required)
 const leadRoutes = require('./routes/leadRoutes');
-app.use('/api', leadRoutes);
-
+app.use('/api', leadRoutes.router); // Use the router property
 
 // Health check endpoint
 app.get('/health', (req, res) => {
@@ -9738,6 +9737,14 @@ server.listen(PORT, async () => {
 
   // Test MinIO connection on startup
   await testMinIOConnection();
+
+  // Initialize Excel file for leads if it doesn't exist
+  try {
+    await leadRoutes.initializeExcelFile();
+    console.log('✅ Lead Excel file initialization completed');
+  } catch (error) {
+    console.error('❌ Failed to initialize lead Excel file:', error);
+  }
 
   // Save admin details on server start
   saveAdmin();
