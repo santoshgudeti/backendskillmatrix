@@ -33,7 +33,13 @@ const JSZip = require('jszip');
 // Add new dependencies at the top
 const PDFDocument = require('pdfkit');
 const Chart = require('chart.js');
-const { createCanvas } = require('canvas');
+let createCanvas;
+try {
+  ({ createCanvas } = require('canvas'));
+} catch (error) {
+  console.warn('Canvas module not available, chart generation will be disabled');
+  createCanvas = null;
+}
 const htmlToPdf = require('html-pdf');
 const sendConsentEmail = require('./services/sendConsentMail'); // Or wherever you place it
 const { handleAutomaticJobPosting } = require('./services/externalJobPostingService');

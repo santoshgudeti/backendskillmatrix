@@ -16,12 +16,16 @@ RUN apk add --no-cache \
     ttf-freefont \
     ttf-liberation \
     ttf-opensans \
+    pkgconfig \
+    pixman-dev \
+    freetype-dev \
     && rm -rf /var/cache/apk/*
 
 # Set environment variables
 ENV NODE_ENV=production
 ENV PYTHON=/usr/bin/python3
 ENV NODE_OPTIONS="--max-old-space-size=4096"
+ENV SKIP_CANVAS_INSTALL=true
 
 # Create app directory
 WORKDIR /usr/src/app
@@ -36,7 +40,7 @@ FROM base AS dependencies
 COPY package*.json ./
 
 # Install all dependencies (including dev dependencies for build)
-RUN npm ci --include=dev
+RUN npm ci --include=dev --legacy-peer-deps
 
 # Build stage
 FROM dependencies AS build
@@ -54,7 +58,7 @@ FROM base AS production-deps
 COPY package*.json ./
 
 # Install only production dependencies
-RUN npm ci --only=production && npm cache clean --force
+RUN npm ci --omit=dev --legacy-peer-deps && npm cache clean --force
 
 # Final production image
 FROM base AS production
@@ -74,12 +78,17 @@ RUN chown -R appuser:appgroup /usr/src/app
 # Switch to non-root user
 USER appuser
 
-# Health check
+# Health check - simplified ping check since there's no /health endpoint
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD node -e "require('http').get('http://localhost:5000/health', (res) => { process.exit(res.statusCode === 200 ? 0 : 1) })" || exit 1
+    CMD node -e "require('net').connect(5000, 'localhost', () => process.exit(0)).on('error', () => process.exit(1))" || exit 1
 
 # Expose port
 EXPOSE 5000
+
+# Add labels for better container management
+LABEL maintainer="skillmatrix-dev-team"
+LABEL version="1.0"
+LABEL description="SkillMatrix AI Backend Server"
 
 # Start the application
 CMD ["node", "server.js"]

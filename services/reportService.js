@@ -1,4 +1,10 @@
-const { createCanvas } = require('canvas');
+let createCanvas;
+try {
+  ({ createCanvas } = require('canvas'));
+} catch (error) {
+  console.warn('Canvas module not available, chart generation will be disabled');
+  createCanvas = null;
+}
 const PDFDocument = require('pdfkit');
 const fs = require('fs');
 const path = require('path');
@@ -7,6 +13,12 @@ const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const s3 = require('../config/aws');
 
 async function generateScoreChart(scores) {
+  // If canvas is not available, return a placeholder buffer
+  if (!createCanvas) {
+    console.warn('Canvas not available, returning empty chart');
+    return Buffer.from('Chart generation disabled - Canvas module not available', 'utf-8');
+  }
+  
   const canvas = createCanvas(400, 200);
   const ctx = canvas.getContext('2d');
   
