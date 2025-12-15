@@ -1,11 +1,14 @@
-# Use Node.js 20 Alpine image
-FROM node:20-alpine
+# Multi-stage build for optimized production image
+FROM node:20-alpine AS base
 
 # Install system dependencies
 RUN apk add --no-cache \
     python3 \
     make \
     g++ \
+    dumb-init \
+    curl \
+    jq \
     && rm -rf /var/cache/apk/*
 
 # Set environment variables
@@ -17,23 +20,57 @@ ENV SKIP_CANVAS_INSTALL=true
 # Create app directory
 WORKDIR /usr/src/app
 
+# Create non-root user for security
+RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+
+# Dependencies stage
+FROM base AS dependencies
+
 # Copy package files
 COPY package*.json ./
 
-# Remove canvas from dependencies and install
-RUN sed -i 's/"canvas":.*,//' package.json && \
-    sed -i 's/"canvas":.*}//' package.json && \
-    npm ci --omit=dev --legacy-peer-deps
+# Remove canvas from dependencies and install production dependencies only
+RUN jq 'del(.dependencies.canvas)' package.json > package-no-canvas.json && \
+    mv package-no-canvas.json package.json && \
+    npm ci --omit=dev --legacy-peer-deps && npm cache clean --force
+
+# Build stage
+FROM dependencies AS build
 
 # Copy application code
 COPY . .
 
+# Final production stage
+FROM base AS production
+
+# Copy built dependencies
+COPY --from=dependencies /usr/src/app/node_modules ./node_modules
+
+# Copy application code
+COPY --from=build /usr/src/app ./
+
+# Create necessary directories with proper permissions
+RUN mkdir -p /usr/src/app/uploads /usr/src/app/logs && \
+    chown -R appuser:appgroup /usr/src/app/uploads /usr/src/app/logs && \
+    chown -R appuser:appgroup /usr/src/app
+
+# Switch to non-root user
+USER appuser
+
+# Health check - improved with actual endpoint check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:5000/health || exit 1
+
 # Expose port
 EXPOSE 5000
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD node -e "require('net').connect(5000, 'localhost', () => process.exit(0)).on('error', () => process.exit(1))" || exit 1
+# Add labels for better container management
+LABEL maintainer="skillmatrix-dev-team"
+LABEL version="1.0"
+LABEL description="SkillMatrix AI Backend Server"
 
-# Run the application
+# Use dumb-init to handle signals properly
+ENTRYPOINT ["dumb-init", "--"]
+
+# Start the application
 CMD ["node", "server.js"]

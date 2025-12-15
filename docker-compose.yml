@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.nocanvas
+    ports:
+      - "5000:5000"
+    environment:
+      - NODE_ENV=production
+      - PORT=5000
+      # Add your environment variables here
+      # - MONGO_URI=your_mongodb_connection_string
+      # - JWT_SECRET=your_jwt_secret
+      # - SMTP_HOST=your_smtp_host
+      # - SMTP_PORT=your_smtp_port
+      # - SMTP_USER=your_smtp_user
+      # - SMTP_PASS=your_smtp_password
+    env_file:
+      - .env
+    restart: unless-stopped
+    networks:
+      - skillmatrix-network
+    volumes:
+      - ./logs:/usr/src/app/logs
+      - ./uploads:/usr/src/app/uploads
+
+networks:
+  skillmatrix-network:
+    driver: bridge

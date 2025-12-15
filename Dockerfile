@@ -19,6 +19,9 @@ RUN apk add --no-cache \
     pkgconfig \
     pixman-dev \
     freetype-dev \
+    dumb-init \
+    curl \
+    jq \
     && rm -rf /var/cache/apk/*
 
 # Set environment variables
@@ -41,6 +44,7 @@ COPY package*.json ./
 
 # Install all dependencies (including dev dependencies for build)
 RUN npm ci --include=dev --legacy-peer-deps
+RUN npm cache clean --force
 
 # Build stage
 FROM dependencies AS build
@@ -48,17 +52,16 @@ FROM dependencies AS build
 # Copy source code
 COPY . .
 
-# Build the application (if you have any build steps)
-# RUN npm run build
-
 # Production dependencies stage
 FROM base AS production-deps
 
 # Copy package files
 COPY package*.json ./
 
-# Install only production dependencies
-RUN npm ci --omit=dev --legacy-peer-deps && npm cache clean --force
+# Remove canvas from dependencies and install only production dependencies
+RUN jq 'del(.dependencies.canvas)' package.json > package-no-canvas.json && \
+    mv package-no-canvas.json package.json && \
+    npm ci --omit=dev --legacy-peer-deps && npm cache clean --force
 
 # Final production image
 FROM base AS production
@@ -69,8 +72,9 @@ COPY --from=production-deps /usr/src/app/node_modules ./node_modules
 # Copy application code
 COPY --from=build /usr/src/app ./
 
-# Create necessary directories
-RUN mkdir -p /usr/src/app/uploads /usr/src/app/logs
+# Create necessary directories with proper permissions
+RUN mkdir -p /usr/src/app/uploads /usr/src/app/logs && \
+    chown -R appuser:appgroup /usr/src/app/uploads /usr/src/app/logs
 
 # Set proper permissions
 RUN chown -R appuser:appgroup /usr/src/app
@@ -78,9 +82,9 @@ RUN chown -R appuser:appgroup /usr/src/app
 # Switch to non-root user
 USER appuser
 
-# Health check - simplified ping check since there's no /health endpoint
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD node -e "require('net').connect(5000, 'localhost', () => process.exit(0)).on('error', () => process.exit(1))" || exit 1
+# Health check - improved with actual endpoint check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:5000/health || exit 1
 
 # Expose port
 EXPOSE 5000
@@ -89,6 +93,9 @@ EXPOSE 5000
 LABEL maintainer="skillmatrix-dev-team"
 LABEL version="1.0"
 LABEL description="SkillMatrix AI Backend Server"
+
+# Use dumb-init to handle signals properly
+ENTRYPOINT ["dumb-init", "--"]
 
 # Start the application
 CMD ["node", "server.js"]
